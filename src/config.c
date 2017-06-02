@@ -9,6 +9,9 @@
 #include "peer.h"
 #include "uapi.h"
 
+#include <linux/completion.h>
+#include <linux/random.h>
+
 static int set_device_port(struct wireguard_device *wg, u16 port)
 {
 	struct wireguard_peer *peer, *temp;
@@ -125,14 +128,38 @@ out:
 	return ret;
 }
 
+struct rng_initializer {
+	struct completion done;
+	struct random_ready_callback cb;
+};
+static void rng_initialized_callback(struct random_ready_callback *cb)
+{
+	complete(&container_of(cb, struct rng_initializer, cb)->done);
+}
 int config_set_device(struct wireguard_device *wg, void __user *user_device)
 {
+	static bool rng_is_initialized = false;
 	int ret;
 	size_t i, offset;
 	struct wireguard_peer *peer, *temp;
 	struct wgdevice in_device;
 	void __user *user_peer;
 	bool modified_static_identity = false;
+
+	if (unlikely(!rng_is_initialized)) {
+		struct rng_initializer rng = {
+			.done = COMPLETION_INITIALIZER(rng.done),
+			.cb = { .owner = THIS_MODULE, .func = rng_initialized_callback }
+		};
+		ret = add_random_ready_callback(&rng.cb);
+		if (!ret) {
+			ret = wait_for_completion_interruptible(&rng.done);
+			if (ret)
+				return ret;
+		} else if (ret != -EALREADY)
+			return ret;
+		rng_is_initialized = true;
+	}
 
 	BUILD_BUG_ON(WG_KEY_LEN != NOISE_PUBLIC_KEY_LEN);
 	BUILD_BUG_ON(WG_KEY_LEN != NOISE_SYMMETRIC_KEY_LEN);

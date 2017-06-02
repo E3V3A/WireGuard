@@ -222,6 +222,19 @@ static const struct in6_addr our_in6addr_any = IN6ADDR_ANY_INIT;
 #define in6addr_any our_in6addr_any
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
+/* This is a disaster. Without this API, we really have no way of
+ * knowing if it's initialized. We just return that it has and hope
+ * for the best... */
+struct random_ready_callback {
+	void (*func)(struct random_ready_callback *rdy);
+	struct module *owner;
+};
+static inline int add_random_ready_callback(struct random_ready_callback *rdy)
+{
+	return -EALREADY;
+}
+#endif
 
 /* https://lkml.org/lkml/2015/6/12/415 */
 #include <linux/netdevice.h>
