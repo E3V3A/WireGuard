@@ -48,6 +48,7 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	atomic_set(&peer->parallel_encryption_inflight, 0);
+	init_waitqueue_head(&peer->parallel_encryption_inflight_wait);
 #endif
 	pr_debug("%s: Peer %Lu created\n", netdev_pub(wg)->name, peer->internal_id);
 	return peer;

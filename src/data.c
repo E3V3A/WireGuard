@@ -307,8 +307,18 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 		ret = -EBUSY;
 		if (unlikely(!ctx->peer))
 			goto err_parallel;
-		atomic_inc(&peer->parallel_encryption_inflight);
-		if (unlikely(padata_do_parallel(peer->device->encrypt_pd, &ctx->padata, choose_cpu(keypair->remote_index)))) {
+		for (;;) {
+			atomic_inc(&peer->parallel_encryption_inflight);
+			ret = padata_do_parallel(peer->device->encrypt_pd, &ctx->padata, choose_cpu(keypair->remote_index));
+			if (ret != -EBUSY || in_interrupt())
+				break;
+			atomic_dec(&peer->parallel_encryption_inflight);
+			ret = wait_event_interruptible(peer->parallel_encryption_inflight_wait, atomic_read(&peer->parallel_encryption_inflight) < 200);
+			if (unlikely(ret))
+				break;
+		}
+
+		if (unlikely(ret)) {
 			atomic_dec(&peer->parallel_encryption_inflight);
 			peer_put(ctx->peer);
 err_parallel:

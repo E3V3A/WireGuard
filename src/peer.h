@@ -10,6 +10,7 @@
 #include <linux/netfilter.h>
 #include <linux/spinlock.h>
 #include <linux/kref.h>
+#include <linux/wait.h>
 #include <net/dst_cache.h>
 
 struct wireguard_device;
@@ -53,6 +54,7 @@ struct wireguard_peer {
 	u64 internal_id;
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	atomic_t parallel_encryption_inflight;
+	wait_queue_head_t parallel_encryption_inflight_wait;
 #endif
 };
 
