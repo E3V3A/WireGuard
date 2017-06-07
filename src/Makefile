@@ -36,11 +36,9 @@ clean:
 
 module-install:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules_install
-	depmod -a
 
 install:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules_install
-	depmod -a
 	$(MAKE) -C tools install
 
 DKMS_TOP_LEVEL := Makefile Kbuild Kconfig $(filter-out wireguard.mod.c, $(wildcard *.c)) $(filter-out version.h, $(wildcard *.h)) version.h dkms.conf
