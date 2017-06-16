@@ -365,43 +365,35 @@ void packet_initialization_worker(struct work_struct *work)
 	spin_unlock_bh(&wg->encryption_queue_lock);
 }
 
-static void begin_parallel_encryption(struct encryption_ctx *ctx)
-{
-	int state;
-	struct wireguard_peer *peer = ctx->peer;
-	struct wireguard_device *wg = peer->device;
-
-	state = ctx->state;
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_add_tail(&ctx->list, &wg->encryption_queue);
-	spin_unlock_bh(&wg->encryption_queue_lock);
-
-	/* If the queue is not yet initialized, it cannot be done until we
-	 * receive a handshake response, so queue the initialization work
-	 * when we handle it. */
-	if (state == CTX_INITIALIZED)
-		queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
-}
-
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 {
+	int state;
 	struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
 	struct sk_buff *skb;
+	struct wireguard_device *wg = peer->device;
 
-	if (!ctx)
+	if (unlikely(!ctx))
 		return -ENOMEM;
 	ctx->peer = peer_rcu_get(peer);
 	skb_queue_head_init(&ctx->queue);
 	skb_queue_splice_init(queue, &ctx->queue);
-	if (unlikely(!queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair))) {
+
+	state = queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair) ? CTX_INITIALIZED : CTX_NEW;
+	if (unlikely(state == CTX_NEW)) {
 		skb_queue_walk (&ctx->queue, skb)
 			skb_orphan(skb);
 		packet_queue_handshake_initiation(peer, false);
-		ctx->state = CTX_NEW;
-	} else {
-		ctx->state = CTX_INITIALIZED;
 	}
-	begin_parallel_encryption(ctx);
+	ctx->state = state;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_add_tail(&ctx->list, &wg->encryption_queue);
+	spin_unlock_bh(&wg->encryption_queue_lock);
+
+	/* Initialization can only happen aftere receiving a handshake response,
+	 * so there is no point in queueing that work here. */
+	if (likely(state == CTX_INITIALIZED))
+		queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
 
 	return 0;
 }
