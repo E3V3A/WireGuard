@@ -354,17 +354,16 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 		struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
 		if (!ctx)
 			goto serial_encrypt;
-		skb_queue_head_init(&ctx->queue);
-		skb_queue_splice_init(queue, &ctx->queue);
 		ctx->keypair = keypair;
 		ctx->peer = peer_rcu_get(peer);
 		ctx->state = CTX_INITIALIZED;
 		ret = -EBUSY;
 		if (unlikely(!ctx->peer)) {
-			skb_queue_splice(&ctx->queue, queue);
 			kmem_cache_free(encryption_ctx_cache, ctx);
 			goto err;
 		}
+		skb_queue_head_init(&ctx->queue);
+		skb_queue_splice_init(queue, &ctx->queue);
 		atomic_inc(&peer->parallel_encryption_inflight);
 		begin_parallel_encryption(ctx);
 	} else
