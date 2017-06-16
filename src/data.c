@@ -16,10 +16,11 @@
 #include <crypto/algapi.h>
 
 struct encryption_ctx {
-	struct padata_priv padata;
+	struct list_head list;
 	struct sk_buff_head queue;
 	struct wireguard_peer *peer;
 	struct noise_keypair *keypair;
+	int state;
 };
 
 struct decryption_ctx {
@@ -231,28 +232,6 @@ static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_
 }
 
 #ifdef CONFIG_WIREGUARD_PARALLEL
-static void begin_parallel_encryption(struct padata_priv *padata)
-{
-	struct encryption_ctx *ctx = container_of(padata, struct encryption_ctx, padata);
-#if IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && defined(CONFIG_ARM)
-	local_bh_enable();
-#endif
-	queue_encrypt_reset(&ctx->queue, ctx->keypair);
-#if IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && defined(CONFIG_ARM)
-	local_bh_disable();
-#endif
-	padata_do_serial(padata);
-}
-
-static void finish_parallel_encryption(struct padata_priv *padata)
-{
-	struct encryption_ctx *ctx = container_of(padata, struct encryption_ctx, padata);
-	packet_create_data_done(&ctx->queue, ctx->peer);
-	atomic_dec(&ctx->peer->parallel_encryption_inflight);
-	peer_put(ctx->peer);
-	kmem_cache_free(encryption_ctx_cache, ctx);
-}
-
 static inline unsigned int choose_cpu(__le32 key)
 {
 	unsigned int cpu_index, cpu, cb_cpu;
@@ -264,6 +243,84 @@ static inline unsigned int choose_cpu(__le32 key)
 		cb_cpu = cpumask_next(cb_cpu, cpu_online_mask);
 
 	return cb_cpu;
+}
+
+static inline int next_cpu(int *next)
+{
+	int cpu = *next;
+
+	if (cpu >= nr_cpumask_bits || !cpumask_test_cpu(cpu, cpu_online_mask))
+		cpu = cpumask_first(cpu_online_mask);
+	*next = cpumask_next(cpu, cpu_online_mask);
+
+	return cpu;
+}
+
+void packet_transmission_worker(struct work_struct *work)
+{
+	struct encryption_ctx *ctx, *prev;
+	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_transmission_work);
+	struct wireguard_device *wg = peer->device;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_for_each_entry(ctx, &wg->encryption_queue, list) {
+		if (ctx->peer != peer)
+			continue;
+		/* Do not traverse past an unencrypted packet for this peer to
+		 * avoid out-of-order delivery. */
+		if (ctx->state != CTX_ENCRYPTED)
+			break;
+		ctx->state = CTX_SENDING;
+		spin_unlock_bh(&wg->encryption_queue_lock);
+
+		packet_create_data_done(&ctx->queue, ctx->peer);
+		atomic_dec(&peer->parallel_encryption_inflight);
+		peer_put(ctx->peer);
+
+		spin_lock_bh(&wg->encryption_queue_lock);
+		/* We cannot do list_next_entry(ctx) after freeing ctx, but
+		 * list_next_entry(list_prev_entry(ctx)) is equivalent. */
+		prev = list_prev_entry(ctx, list);
+		list_del(&ctx->list);
+		kmem_cache_free(encryption_ctx_cache, ctx);
+		ctx = prev;
+	}
+	spin_unlock_bh(&wg->encryption_queue_lock);
+}
+
+void packet_encryption_worker(struct work_struct *work)
+{
+	struct encryption_ctx *ctx;
+	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_for_each_entry(ctx, &wg->encryption_queue, list) {
+		if (ctx->state != CTX_INITIALIZED)
+			continue;
+		ctx->state = CTX_ENCRYPTING;
+		spin_unlock_bh(&wg->encryption_queue_lock);
+
+		queue_encrypt_reset(&ctx->queue, ctx->keypair);
+
+		spin_lock_bh(&wg->encryption_queue_lock);
+		ctx->state = CTX_ENCRYPTED;
+		queue_work_on(choose_cpu(ctx->keypair->remote_index), wg->crypt_wq, &ctx->peer->packet_transmission_work);
+	}
+	spin_unlock_bh(&wg->encryption_queue_lock);
+}
+
+static void begin_parallel_encryption(struct encryption_ctx *ctx)
+{
+	int cpu;
+	struct wireguard_peer *peer = ctx->peer;
+	struct wireguard_device *wg = peer->device;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_add_tail(&ctx->list, &wg->encryption_queue);
+	spin_unlock_bh(&wg->encryption_queue_lock);
+
+	cpu = next_cpu(&wg->encryption_cpu);
+	queue_work_on(cpu, wg->crypt_wq, &per_cpu_ptr(wg->encryption_worker, cpu)->work);
 }
 #endif
 
@@ -299,23 +356,17 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 			goto serial_encrypt;
 		skb_queue_head_init(&ctx->queue);
 		skb_queue_splice_init(queue, &ctx->queue);
-		memset(&ctx->padata, 0, sizeof(ctx->padata));
-		ctx->padata.parallel = begin_parallel_encryption;
-		ctx->padata.serial = finish_parallel_encryption;
 		ctx->keypair = keypair;
 		ctx->peer = peer_rcu_get(peer);
+		ctx->state = CTX_INITIALIZED;
 		ret = -EBUSY;
-		if (unlikely(!ctx->peer))
-			goto err_parallel;
-		atomic_inc(&peer->parallel_encryption_inflight);
-		if (unlikely(padata_do_parallel(peer->device->encrypt_pd, &ctx->padata, choose_cpu(keypair->remote_index)))) {
-			atomic_dec(&peer->parallel_encryption_inflight);
-			peer_put(ctx->peer);
-err_parallel:
+		if (unlikely(!ctx->peer)) {
 			skb_queue_splice(&ctx->queue, queue);
 			kmem_cache_free(encryption_ctx_cache, ctx);
 			goto err;
 		}
+		atomic_inc(&peer->parallel_encryption_inflight);
+		begin_parallel_encryption(ctx);
 	} else
 serial_encrypt:
 #endif

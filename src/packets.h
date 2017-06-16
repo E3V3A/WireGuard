@@ -13,6 +13,15 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 
+enum {
+	CTX_NEW = 0,
+	CTX_INITIALIZING,
+	CTX_INITIALIZED,
+	CTX_ENCRYPTING,
+	CTX_ENCRYPTED,
+	CTX_SENDING,
+};
+
 struct wireguard_device;
 struct wireguard_peer;
 struct sk_buff;
@@ -54,6 +63,9 @@ static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
 #ifdef CONFIG_WIREGUARD_PARALLEL
 int packet_init_data_caches(void);
 void packet_deinit_data_caches(void);
+
+void packet_encryption_worker(struct work_struct *work);
+void packet_transmission_worker(struct work_struct *work);
 #endif
 
 #ifdef DEBUG

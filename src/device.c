@@ -225,7 +225,7 @@ static void destruct(struct net_device *dev)
 	destroy_workqueue(wg->incoming_handshake_wq);
 	destroy_workqueue(wg->peer_wq);
 #ifdef CONFIG_WIREGUARD_PARALLEL
-	padata_free(wg->encrypt_pd);
+	free_percpu(wg->encryption_worker);
 	padata_free(wg->decrypt_pd);
 	destroy_workqueue(wg->crypt_wq);
 #endif
@@ -315,10 +315,15 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 	if (!wg->crypt_wq)
 		goto error_5;
 
-	wg->encrypt_pd = padata_alloc_possible(wg->crypt_wq);
-	if (!wg->encrypt_pd)
+	INIT_LIST_HEAD(&wg->encryption_queue);
+	spin_lock_init(&wg->encryption_queue_lock);
+	wg->encryption_worker = alloc_percpu(struct percpu_worker);
+	if (!wg->encryption_worker)
 		goto error_6;
-	padata_start(wg->encrypt_pd);
+	for_each_possible_cpu (cpu) {
+		per_cpu_ptr(wg->encryption_worker, cpu)->wg = wg;
+		INIT_WORK(&per_cpu_ptr(wg->encryption_worker, cpu)->work, packet_encryption_worker);
+	}
 
 	wg->decrypt_pd = padata_alloc_possible(wg->crypt_wq);
 	if (!wg->decrypt_pd)
@@ -349,7 +354,7 @@ error_8:
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	padata_free(wg->decrypt_pd);
 error_7:
-	padata_free(wg->encrypt_pd);
+	free_percpu(wg->encryption_worker);
 error_6:
 	destroy_workqueue(wg->crypt_wq);
 error_5:

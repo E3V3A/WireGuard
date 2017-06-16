@@ -21,6 +21,11 @@ struct handshake_worker {
 	struct work_struct work;
 };
 
+struct percpu_worker {
+	struct wireguard_device *wg;
+	struct work_struct work;
+};
+
 struct wireguard_device {
 	struct net_device *dev;
 	struct list_head device_list;
@@ -42,7 +47,11 @@ struct wireguard_device {
 	struct mutex socket_update_lock;
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	struct workqueue_struct *crypt_wq;
-	struct padata_instance *encrypt_pd, *decrypt_pd;
+	int encryption_cpu;
+	struct list_head encryption_queue;
+	spinlock_t encryption_queue_lock;
+	struct percpu_worker __percpu *encryption_worker;
+	struct padata_instance *decrypt_pd;
 #endif
 };
 
