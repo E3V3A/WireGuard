@@ -256,6 +256,12 @@ static inline int next_cpu(int *next)
 	return cpu;
 }
 
+#define queue_work_on_next_cpu(cpu, wq, ws) \
+({ \
+	int __cpu = next_cpu(cpu); \
+	queue_work_on(__cpu, wq, &per_cpu_ptr(ws, __cpu)->work); \
+})
+
 void packet_transmission_worker(struct work_struct *work)
 {
 	struct encryption_ctx *ctx, *prev;
@@ -311,7 +317,6 @@ void packet_encryption_worker(struct work_struct *work)
 
 static void begin_parallel_encryption(struct encryption_ctx *ctx)
 {
-	int cpu;
 	struct wireguard_peer *peer = ctx->peer;
 	struct wireguard_device *wg = peer->device;
 
@@ -319,8 +324,7 @@ static void begin_parallel_encryption(struct encryption_ctx *ctx)
 	list_add_tail(&ctx->list, &wg->encryption_queue);
 	spin_unlock_bh(&wg->encryption_queue_lock);
 
-	cpu = next_cpu(&wg->encryption_cpu);
-	queue_work_on(cpu, wg->crypt_wq, &per_cpu_ptr(wg->encryption_worker, cpu)->work);
+	queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
 }
 #endif
 
