@@ -26,6 +26,14 @@ struct wireguard_device;
 struct wireguard_peer;
 struct sk_buff;
 
+struct encryption_ctx {
+	struct list_head list;
+	struct sk_buff_head queue;
+	struct wireguard_peer *peer;
+	struct noise_keypair *keypair;
+	int state;
+};
+
 struct packet_cb {
 	u64 nonce;
 	u8 ds;

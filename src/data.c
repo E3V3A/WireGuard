@@ -15,14 +15,6 @@
 #include <net/xfrm.h>
 #include <crypto/algapi.h>
 
-struct encryption_ctx {
-	struct list_head list;
-	struct sk_buff_head queue;
-	struct wireguard_peer *peer;
-	struct noise_keypair *keypair;
-	int state;
-};
-
 struct decryption_ctx {
 	struct padata_priv padata;
 	struct endpoint endpoint;

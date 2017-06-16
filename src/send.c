@@ -106,10 +106,33 @@ static inline void keep_key_fresh(struct wireguard_peer *peer)
 		packet_queue_handshake_initiation(peer, false);
 }
 
+static inline bool peer_has_queued_packets(struct wireguard_peer *peer)
+{
+	struct encryption_ctx *ctx;
+	struct wireguard_device *wg = peer->device;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_for_each_entry(ctx, &wg->encryption_queue, list) {
+		if (ctx->peer == peer) {
+			spin_unlock_bh(&wg->encryption_queue_lock);
+			return true;
+		}
+	}
+	spin_unlock_bh(&wg->encryption_queue_lock);
+
+	return false;
+}
+
 void packet_send_keepalive(struct wireguard_peer *peer)
 {
 	struct sk_buff *skb;
-	if (skb_queue_empty(&peer->tx_packet_queue) && list_empty(&peer->device->encryption_queue)) {
+
+	if (peer_has_queued_packets(peer)) {
+		/* There are packets pending which need to be initialized with the new keypair. */
+		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
+	} else if (!skb_queue_empty(&peer->tx_packet_queue)) {
+		packet_send_queue(peer);
+	} else {
 		skb = alloc_skb(DATA_PACKET_HEAD_ROOM + MESSAGE_MINIMUM_LENGTH, GFP_ATOMIC);
 		if (unlikely(!skb))
 			return;
@@ -117,11 +140,8 @@ void packet_send_keepalive(struct wireguard_peer *peer)
 		skb->dev = peer->device->dev;
 		skb_queue_tail(&peer->tx_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %Lu (%pISpfsc)\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
-	} else {
-		/* There are packets pending which need to be initialized with the new keypair. */
-		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
+		packet_send_queue(peer);
 	}
-	packet_send_queue(peer);
 }
 
 void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *peer)
