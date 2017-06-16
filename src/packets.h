@@ -60,14 +60,12 @@ static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
 	return 0;
 }
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
 int packet_init_data_caches(void);
 void packet_deinit_data_caches(void);
 
 void packet_encryption_worker(struct work_struct *work);
 void packet_initialization_worker(struct work_struct *work);
 void packet_transmission_worker(struct work_struct *work);
-#endif
 
 #ifdef DEBUG
 bool packet_counter_selftest(void);

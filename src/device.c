@@ -225,11 +225,11 @@ static void destruct(struct net_device *dev)
 	wg->incoming_port = 0;
 	destroy_workqueue(wg->incoming_handshake_wq);
 	destroy_workqueue(wg->peer_wq);
-#ifdef CONFIG_WIREGUARD_PARALLEL
 	free_percpu(wg->encryption_worker);
+#ifdef CONFIG_WIREGUARD_PARALLEL
 	padata_free(wg->decrypt_pd);
-	destroy_workqueue(wg->crypt_wq);
 #endif
+	destroy_workqueue(wg->crypt_wq);
 	routing_table_free(&wg->peer_routing_table);
 	ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(struct noise_static_identity));
@@ -311,7 +311,6 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 	if (!wg->peer_wq)
 		goto error_4;
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
 	wg->crypt_wq = alloc_workqueue("wg-crypt-%s", WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 2, dev->name);
 	if (!wg->crypt_wq)
 		goto error_5;
@@ -326,6 +325,7 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		INIT_WORK(&per_cpu_ptr(wg->encryption_worker, cpu)->work, packet_encryption_worker);
 	}
 
+#ifdef CONFIG_WIREGUARD_PARALLEL
 	wg->decrypt_pd = padata_alloc_possible(wg->crypt_wq);
 	if (!wg->decrypt_pd)
 		goto error_7;
@@ -355,11 +355,11 @@ error_8:
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	padata_free(wg->decrypt_pd);
 error_7:
+#endif
 	free_percpu(wg->encryption_worker);
 error_6:
 	destroy_workqueue(wg->crypt_wq);
 error_5:
-#endif
 	destroy_workqueue(wg->peer_wq);
 error_4:
 	destroy_workqueue(wg->incoming_handshake_wq);

@@ -30,29 +30,33 @@ struct decryption_ctx {
 	struct noise_keypair *keypair;
 };
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
 static struct kmem_cache *encryption_ctx_cache __read_mostly;
+#ifdef CONFIG_WIREGUARD_PARALLEL
 static struct kmem_cache *decryption_ctx_cache __read_mostly;
+#endif
 
 int __init packet_init_data_caches(void)
 {
 	encryption_ctx_cache = KMEM_CACHE(encryption_ctx, 0);
 	if (!encryption_ctx_cache)
 		return -ENOMEM;
+#ifdef CONFIG_WIREGUARD_PARALLEL
 	decryption_ctx_cache = KMEM_CACHE(decryption_ctx, 0);
 	if (!decryption_ctx_cache) {
 		kmem_cache_destroy(encryption_ctx_cache);
 		return -ENOMEM;
 	}
+#endif
 	return 0;
 }
 
 void packet_deinit_data_caches(void)
 {
 	kmem_cache_destroy(encryption_ctx_cache);
+#ifdef CONFIG_WIREGUARD_PARALLEL
 	kmem_cache_destroy(decryption_ctx_cache);
-}
 #endif
+}
 
 /* This is RFC6479, a replay detection bitmap algorithm that avoids bitshifts */
 static inline bool counter_validate(union noise_counter *counter, u64 their_counter)
@@ -253,7 +257,6 @@ static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_
 	noise_keypair_put(keypair);
 }
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
 static inline unsigned int choose_cpu(__le32 key)
 {
 	unsigned int cpu_index, cpu, cb_cpu;
@@ -302,7 +305,6 @@ void packet_transmission_worker(struct work_struct *work)
 		spin_unlock_bh(&wg->encryption_queue_lock);
 
 		packet_create_data_done(&ctx->queue, ctx->peer);
-		atomic_dec(&peer->parallel_encryption_inflight);
 		peer_put(ctx->peer);
 
 		spin_lock_bh(&wg->encryption_queue_lock);
@@ -380,43 +382,27 @@ static void begin_parallel_encryption(struct encryption_ctx *ctx)
 	if (state == CTX_INITIALIZED)
 		queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
 }
-#endif
 
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 {
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	if ((skb_queue_len(queue) > 1 || queue->next->len > 256 || atomic_read(&peer->parallel_encryption_inflight) > 0) && cpumask_weight(cpu_online_mask) > 1) {
-		struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
-		if (!ctx)
-			goto serial_encrypt;
-		ctx->peer = peer_rcu_get(peer);
-		if (unlikely(!ctx->peer)) {
-			kmem_cache_free(encryption_ctx_cache, ctx);
-			return -ENOKEY;
-		}
-		skb_queue_head_init(&ctx->queue);
-		skb_queue_splice_init(queue, &ctx->queue);
-		atomic_inc(&peer->parallel_encryption_inflight);
-		if (unlikely(!queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair))) {
-			struct sk_buff *skb;
-			skb_queue_walk (&ctx->queue, skb)
-				skb_orphan(skb);
-			packet_queue_handshake_initiation(peer, false);
-			ctx->state = CTX_NEW;
-		} else {
-			ctx->state = CTX_INITIALIZED;
-		}
-		begin_parallel_encryption(ctx);
-	} else
-serial_encrypt:
-#endif
-	{
-		struct noise_keypair *keypair;
-		if (unlikely(!queue_add_keypair_and_nonces(queue, peer, &keypair)))
-			return -ENOKEY;
-		queue_encrypt_reset(queue, keypair);
-		packet_create_data_done(queue, peer);
+	struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
+	struct sk_buff *skb;
+
+	if (!ctx)
+		return -ENOMEM;
+	ctx->peer = peer_rcu_get(peer);
+	skb_queue_head_init(&ctx->queue);
+	skb_queue_splice_init(queue, &ctx->queue);
+	if (unlikely(!queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair))) {
+		skb_queue_walk (&ctx->queue, skb)
+			skb_orphan(skb);
+		packet_queue_handshake_initiation(peer, false);
+		ctx->state = CTX_NEW;
+	} else {
+		ctx->state = CTX_INITIALIZED;
 	}
+	begin_parallel_encryption(ctx);
+
 	return 0;
 }
 
