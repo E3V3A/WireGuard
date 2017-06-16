@@ -109,7 +109,7 @@ static inline void keep_key_fresh(struct wireguard_peer *peer)
 void packet_send_keepalive(struct wireguard_peer *peer)
 {
 	struct sk_buff *skb;
-	if (skb_queue_empty(&peer->tx_packet_queue)) {
+	if (skb_queue_empty(&peer->tx_packet_queue) && list_empty(&peer->device->encryption_queue)) {
 		skb = alloc_skb(DATA_PACKET_HEAD_ROOM + MESSAGE_MINIMUM_LENGTH, GFP_ATOMIC);
 		if (unlikely(!skb))
 			return;
@@ -117,6 +117,9 @@ void packet_send_keepalive(struct wireguard_peer *peer)
 		skb->dev = peer->device->dev;
 		skb_queue_tail(&peer->tx_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %Lu (%pISpfsc)\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
+	} else {
+		/* There are packets pending which need to be initialized with the new keypair. */
+		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
 	}
 	packet_send_queue(peer);
 }

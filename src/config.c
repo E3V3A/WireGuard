@@ -113,8 +113,10 @@ static int set_peer(struct wireguard_device *wg, void __user *user_peer, size_t 
 			packet_send_keepalive(peer);
 	}
 
-	if (wg->dev->flags & IFF_UP)
+	if (wg->dev->flags & IFF_UP) {
+		queue_work(wg->crypt_wq, &peer->packet_initialization_work);
 		packet_send_queue(peer);
+	}
 
 	peer_put(peer);
 

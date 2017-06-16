@@ -57,6 +57,7 @@ static int open(struct net_device *dev)
 		return ret;
 	peer_for_each (wg, peer, temp, true) {
 		timers_init_peer(peer);
+		queue_work(wg->crypt_wq, &peer->packet_initialization_work);
 		packet_send_queue(peer);
 		if (peer->persistent_keepalive_interval)
 			packet_send_keepalive(peer);

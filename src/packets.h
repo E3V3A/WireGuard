@@ -65,6 +65,7 @@ int packet_init_data_caches(void);
 void packet_deinit_data_caches(void);
 
 void packet_encryption_worker(struct work_struct *work);
+void packet_initialization_worker(struct work_struct *work);
 void packet_transmission_worker(struct work_struct *work);
 #endif
 

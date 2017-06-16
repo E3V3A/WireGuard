@@ -54,7 +54,7 @@ struct wireguard_peer {
 	struct list_head peer_list;
 	u64 internal_id;
 #ifdef CONFIG_WIREGUARD_PARALLEL
-	struct work_struct packet_transmission_work;
+	struct work_struct packet_initialization_work, packet_transmission_work;
 	atomic_t parallel_encryption_inflight;
 #endif
 };

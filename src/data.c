@@ -215,6 +215,28 @@ static inline bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *
 	return true;
 }
 
+static inline bool queue_add_keypair_and_nonces(struct sk_buff_head *queue, struct wireguard_peer *peer, struct noise_keypair **keypair_out)
+{
+	struct noise_keypair *keypair;
+	struct sk_buff *skb;
+
+	rcu_read_lock_bh();
+	keypair = noise_keypair_get(rcu_dereference_bh(peer->keypairs.current_keypair));
+	rcu_read_unlock_bh();
+	if (unlikely(!keypair))
+		return false;
+
+	skb_queue_walk(queue, skb) {
+		if (unlikely(!get_encryption_nonce(&PACKET_CB(skb)->nonce, &keypair->sending))) {
+			noise_keypair_put(keypair);
+			return false;
+		}
+	}
+
+	*keypair_out = keypair;
+	return true;
+}
+
 static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_keypair *keypair)
 {
 	struct sk_buff *skb, *tmp;
@@ -315,72 +337,87 @@ void packet_encryption_worker(struct work_struct *work)
 	spin_unlock_bh(&wg->encryption_queue_lock);
 }
 
+void packet_initialization_worker(struct work_struct *work)
+{
+	bool success;
+	struct encryption_ctx *ctx;
+	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_initialization_work);
+	struct wireguard_device *wg = peer->device;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_for_each_entry(ctx, &wg->encryption_queue, list) {
+		if (ctx->peer != peer || ctx->state != CTX_NEW)
+			continue;
+		ctx->state = CTX_INITIALIZING;
+		spin_unlock_bh(&wg->encryption_queue_lock);
+
+		success = queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair);
+		if (!success)
+			packet_queue_handshake_initiation(peer, false);
+
+		spin_lock_bh(&wg->encryption_queue_lock);
+		ctx->state = success ? CTX_INITIALIZED : CTX_NEW;
+		if (success)
+			queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
+	}
+	spin_unlock_bh(&wg->encryption_queue_lock);
+}
+
 static void begin_parallel_encryption(struct encryption_ctx *ctx)
 {
+	int state;
 	struct wireguard_peer *peer = ctx->peer;
 	struct wireguard_device *wg = peer->device;
 
+	state = ctx->state;
 	spin_lock_bh(&wg->encryption_queue_lock);
 	list_add_tail(&ctx->list, &wg->encryption_queue);
 	spin_unlock_bh(&wg->encryption_queue_lock);
 
-	queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
+	/* If the queue is not yet initialized, it cannot be done until we
+	 * receive a handshake response, so queue the initialization work
+	 * when we handle it. */
+	if (state == CTX_INITIALIZED)
+		queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
 }
 #endif
 
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 {
-	int ret = -ENOKEY;
-	struct noise_keypair *keypair;
-	struct sk_buff *skb;
-
-	rcu_read_lock_bh();
-	keypair = noise_keypair_get(rcu_dereference_bh(peer->keypairs.current_keypair));
-	rcu_read_unlock_bh();
-	if (unlikely(!keypair))
-		return ret;
-
-	skb_queue_walk (queue, skb) {
-		if (unlikely(!get_encryption_nonce(&PACKET_CB(skb)->nonce, &keypair->sending)))
-			goto err;
-
-		/* After the first time through the loop, if we've suceeded with a legitimate nonce,
-		 * then we don't want a -ENOKEY error if subsequent nonces fail. Rather, if this
-		 * condition arises, we simply want error out hard, and drop the entire queue. This
-		 * is partially lazy programming and TODO: this could be made to only requeue the
-		 * ones that had no nonce. But I'm not sure it's worth the added complexity, given
-		 * how rarely that condition should arise. */
-		ret = -EPIPE;
-	}
-
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	if ((skb_queue_len(queue) > 1 || queue->next->len > 256 || atomic_read(&peer->parallel_encryption_inflight) > 0) && cpumask_weight(cpu_online_mask) > 1) {
 		struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
 		if (!ctx)
 			goto serial_encrypt;
-		ctx->keypair = keypair;
 		ctx->peer = peer_rcu_get(peer);
-		ctx->state = CTX_INITIALIZED;
 		if (unlikely(!ctx->peer)) {
 			kmem_cache_free(encryption_ctx_cache, ctx);
-			goto err;
+			return -ENOKEY;
 		}
 		skb_queue_head_init(&ctx->queue);
 		skb_queue_splice_init(queue, &ctx->queue);
 		atomic_inc(&peer->parallel_encryption_inflight);
+		if (unlikely(!queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair))) {
+			struct sk_buff *skb;
+			skb_queue_walk (&ctx->queue, skb)
+				skb_orphan(skb);
+			packet_queue_handshake_initiation(peer, false);
+			ctx->state = CTX_NEW;
+		} else {
+			ctx->state = CTX_INITIALIZED;
+		}
 		begin_parallel_encryption(ctx);
 	} else
 serial_encrypt:
 #endif
 	{
+		struct noise_keypair *keypair;
+		if (unlikely(!queue_add_keypair_and_nonces(queue, peer, &keypair)))
+			return -ENOKEY;
 		queue_encrypt_reset(queue, keypair);
 		packet_create_data_done(queue, peer);
 	}
 	return 0;
-
-err:
-	noise_keypair_put(keypair);
-	return ret;
 }
 
 static void begin_decrypt_packet(struct decryption_ctx *ctx)
