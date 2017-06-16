@@ -390,6 +390,28 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 	return 0;
 }
 
+void packet_queue_purge(struct wireguard_peer *peer)
+{
+	struct encryption_ctx *ctx;
+	struct wireguard_device *wg = peer->device;
+
+	spin_lock_bh(&wg->encryption_queue_lock);
+	list_for_each_entry(ctx, &wg->encryption_queue, list) {
+		if (ctx->peer == peer) {
+			/* We can't throw away a packet that's currently being processed. */
+			if (ctx->state == CTX_INITIALIZING || ctx->state == CTX_ENCRYPTING || ctx->state == CTX_SENDING)
+				continue;
+			if (ctx->state < CTX_ENCRYPTED)
+				noise_keypair_put(ctx->keypair);
+			peer_put(ctx->peer);
+			list_del(&ctx->list);
+			skb_queue_purge(&ctx->queue);
+			kmem_cache_free(encryption_ctx_cache, ctx);
+		}
+	}
+	spin_unlock_bh(&wg->encryption_queue_lock);
+}
+
 static void begin_decrypt_packet(struct decryption_ctx *ctx)
 {
 	if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {

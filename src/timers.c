@@ -33,7 +33,7 @@ static void expired_retransmit_handshake(unsigned long ptr)
 		del_timer(&peer->timer_send_keepalive);
 		/* We remove all existing packets and don't try again,
 		 * if we try unsuccessfully for too long to make a handshake. */
-		skb_queue_purge(&peer->tx_packet_queue);
+		packet_queue_purge(peer);
 		/* We set a timer for destroying any residue that might be left
 		 * of a partial exchange. */
 		if (likely(peer->timers_enabled) && !timer_pending(&peer->timer_zero_key_material))

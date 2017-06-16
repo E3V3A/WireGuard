@@ -58,7 +58,6 @@ static int open(struct net_device *dev)
 	peer_for_each (wg, peer, temp, true) {
 		timers_init_peer(peer);
 		queue_work(wg->crypt_wq, &peer->packet_initialization_work);
-		packet_send_queue(peer);
 		if (peer->persistent_keepalive_interval)
 			packet_send_keepalive(peer);
 	}
@@ -112,6 +111,7 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 	struct wireguard_device *wg = netdev_priv(dev);
 	struct wireguard_peer *peer;
 	struct sk_buff *next;
+	struct sk_buff_head queue;
 	int ret;
 
 	if (unlikely(dev_recursion_level() > 4)) {
@@ -142,11 +142,7 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 		goto err_peer;
 	}
 
-	/* If the queue is getting too big, we start removing the oldest packets until it's small again.
-	 * We do this before adding the new packet, so we don't remove GSO segments that are in excess. */
-	while (skb_queue_len(&peer->tx_packet_queue) > MAX_QUEUED_OUTGOING_PACKETS)
-		dev_kfree_skb(skb_dequeue(&peer->tx_packet_queue));
-
+	__skb_queue_head_init(&queue);
 	if (!skb_is_gso(skb))
 		skb->next = NULL;
 	else {
@@ -170,10 +166,12 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 		 * so at this point we're in a position to drop it. */
 		skb_dst_drop(skb);
 
-		skb_queue_tail(&peer->tx_packet_queue, skb);
+		__skb_queue_tail(&queue, skb);
 	} while ((skb = next) != NULL);
 
-	packet_send_queue(peer);
+	if (packet_create_data(&queue, peer))
+		goto err_peer;
+
 	peer_put(peer);
 	return NETDEV_TX_OK;
 

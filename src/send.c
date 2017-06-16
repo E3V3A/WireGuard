@@ -126,21 +126,21 @@ static inline bool peer_has_queued_packets(struct wireguard_peer *peer)
 void packet_send_keepalive(struct wireguard_peer *peer)
 {
 	struct sk_buff *skb;
+	struct sk_buff_head queue;
 
 	if (peer_has_queued_packets(peer)) {
 		/* There are packets pending which need to be initialized with the new keypair. */
 		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
-	} else if (!skb_queue_empty(&peer->tx_packet_queue)) {
-		packet_send_queue(peer);
 	} else {
 		skb = alloc_skb(DATA_PACKET_HEAD_ROOM + MESSAGE_MINIMUM_LENGTH, GFP_ATOMIC);
 		if (unlikely(!skb))
 			return;
 		skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
 		skb->dev = peer->device->dev;
-		skb_queue_tail(&peer->tx_packet_queue, skb);
+		__skb_queue_head_init(&queue);
+		__skb_queue_tail(&queue, skb);
+		packet_create_data(&queue, peer);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %Lu (%pISpfsc)\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
-		packet_send_queue(peer);
 	}
 }
 
@@ -162,46 +162,4 @@ void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *
 		timers_data_sent(peer);
 
 	keep_key_fresh(peer);
-}
-
-void packet_send_queue(struct wireguard_peer *peer)
-{
-	struct sk_buff_head queue;
-	struct sk_buff *skb;
-
-	/* Steal the current queue into our local one. */
-	skb_queue_head_init(&queue);
-	spin_lock_bh(&peer->tx_packet_queue.lock);
-	skb_queue_splice_init(&peer->tx_packet_queue, &queue);
-	spin_unlock_bh(&peer->tx_packet_queue.lock);
-
-	if (unlikely(skb_queue_empty(&queue)))
-		return;
-
-	/* We submit it for encryption and sending. */
-	switch (packet_create_data(&queue, peer)) {
-	case 0:
-		break;
-	case -ENOKEY:
-		/* ENOKEY means that we don't have a valid session for the peer, which
-		 * means we should initiate a session. */
-
-		skb_queue_walk (&queue, skb)
-			skb_orphan(skb);
-
-		/* We stick the remaining skbs from local_queue at the top of the peer's
-		 * queue again, setting the top of local_queue to be the skb that begins
-		 * the requeueing. */
-		spin_lock_bh(&peer->tx_packet_queue.lock);
-		skb_queue_splice(&queue, &peer->tx_packet_queue);
-		spin_unlock_bh(&peer->tx_packet_queue.lock);
-
-		packet_queue_handshake_initiation(peer, false);
-		break;
-	default:
-		/* If we failed for any other reason, we want to just free the packets and
-		 * forget about them. We do this unlocked, since we're the only ones with
-		 * a reference to the local queue. */
-		__skb_queue_purge(&queue);
-	}
 }
