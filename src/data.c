@@ -357,7 +357,6 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 		ctx->keypair = keypair;
 		ctx->peer = peer_rcu_get(peer);
 		ctx->state = CTX_INITIALIZED;
-		ret = -EBUSY;
 		if (unlikely(!ctx->peer)) {
 			kmem_cache_free(encryption_ctx_cache, ctx);
 			goto err;

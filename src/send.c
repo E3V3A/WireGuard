@@ -139,17 +139,12 @@ void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *
 		timers_data_sent(peer);
 
 	keep_key_fresh(peer);
-
-	if (unlikely(peer->need_resend_queue))
-		packet_send_queue(peer);
 }
 
 void packet_send_queue(struct wireguard_peer *peer)
 {
 	struct sk_buff_head queue;
 	struct sk_buff *skb;
-
-	peer->need_resend_queue = false;
 
 	/* Steal the current queue into our local one. */
 	skb_queue_head_init(&queue);
@@ -164,30 +159,16 @@ void packet_send_queue(struct wireguard_peer *peer)
 	switch (packet_create_data(&queue, peer)) {
 	case 0:
 		break;
-	case -EBUSY:
-		/* EBUSY happens when the parallel workers are all filled up, in which
-		 * case we should requeue everything. */
-
-		/* First, we mark that we should try to do this later, when existing
-		 * jobs are done. */
-		peer->need_resend_queue = true;
-
-		/* We stick the remaining skbs from local_queue at the top of the peer's
-		 * queue again, setting the top of local_queue to be the skb that begins
-		 * the requeueing. */
-		spin_lock_bh(&peer->tx_packet_queue.lock);
-		skb_queue_splice(&queue, &peer->tx_packet_queue);
-		spin_unlock_bh(&peer->tx_packet_queue.lock);
-		break;
 	case -ENOKEY:
 		/* ENOKEY means that we don't have a valid session for the peer, which
-		 * means we should initiate a session, but after requeuing like above.
-		 * Since we'll be queuing these up for potentially a little while, we
-		 * first make sure they're no longer using up a socket's write buffer. */
+		 * means we should initiate a session. */
 
 		skb_queue_walk (&queue, skb)
 			skb_orphan(skb);
 
+		/* We stick the remaining skbs from local_queue at the top of the peer's
+		 * queue again, setting the top of local_queue to be the skb that begins
+		 * the requeueing. */
 		spin_lock_bh(&peer->tx_packet_queue.lock);
 		skb_queue_splice(&queue, &peer->tx_packet_queue);
 		spin_unlock_bh(&peer->tx_packet_queue.lock);
