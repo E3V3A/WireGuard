@@ -314,7 +314,6 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		goto error_5;
 
 	INIT_LIST_HEAD(&wg->encryption_queue);
-	spin_lock_init(&wg->encryption_queue_lock);
 	wg->encryption_worker = alloc_percpu(struct percpu_worker);
 	if (!wg->encryption_worker)
 		goto error_6;

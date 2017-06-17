@@ -48,7 +48,6 @@ struct wireguard_device {
 	struct workqueue_struct *crypt_wq;
 	int encryption_cpu;
 	struct list_head encryption_queue;
-	spinlock_t encryption_queue_lock;
 	struct percpu_worker __percpu *encryption_worker;
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	struct padata_instance *decrypt_pd;

@@ -4,6 +4,7 @@
 #include "timers.h"
 #include "device.h"
 #include "peer.h"
+#include "queue.h"
 #include "socket.h"
 #include "messages.h"
 #include "cookie.h"
@@ -106,29 +107,12 @@ static inline void keep_key_fresh(struct wireguard_peer *peer)
 		packet_queue_handshake_initiation(peer, false);
 }
 
-static inline bool peer_has_queued_packets(struct wireguard_peer *peer)
-{
-	struct crypt_ctx *ctx;
-	struct wireguard_device *wg = peer->device;
-
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_for_each_entry(ctx, &wg->encryption_queue, list) {
-		if (ctx->peer == peer) {
-			spin_unlock_bh(&wg->encryption_queue_lock);
-			return true;
-		}
-	}
-	spin_unlock_bh(&wg->encryption_queue_lock);
-
-	return false;
-}
-
 void packet_send_keepalive(struct wireguard_peer *peer)
 {
 	struct sk_buff *skb;
 	struct sk_buff_head queue;
 
-	if (peer_has_queued_packets(peer)) {
+	if (peer_has_queued_ctx(&peer->device->encryption_queue, peer)) {
 		/* There are packets pending which need to be initialized with the new keypair. */
 		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
 	} else {

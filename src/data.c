@@ -5,6 +5,7 @@
 #include "peer.h"
 #include "messages.h"
 #include "packets.h"
+#include "queue.h"
 #include "hashtables.h"
 
 #include <linux/rcupdate.h>
@@ -48,6 +49,13 @@ void packet_deinit_data_caches(void)
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	kmem_cache_destroy(decryption_ctx_cache);
 #endif
+}
+
+void packet_free_crypt_ctx(struct rcu_head *head)
+{
+	struct crypt_ctx *ctx = container_of(head, struct crypt_ctx, rcu);
+
+	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 
 /* This is RFC6479, a replay detection bitmap algorithm that avoids bitshifts */
@@ -281,80 +289,44 @@ static inline int next_cpu(int *next)
 
 void packet_transmission_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx, *prev;
+	struct crypt_ctx *ctx;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_transmission_work);
-	struct wireguard_device *wg = peer->device;
 
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_for_each_entry(ctx, &wg->encryption_queue, list) {
-		if (ctx->peer != peer)
-			continue;
-		/* Do not traverse past an unencrypted packet for this peer to
-		 * avoid out-of-order delivery. */
-		if (ctx->state != CTX_ENCRYPTED)
-			break;
-		ctx->state = CTX_SENDING;
-		spin_unlock_bh(&wg->encryption_queue_lock);
-
+	while ((ctx = dequeue_ctx(&peer->device->encryption_queue, peer, CTX_ENCRYPTED)) != NULL) {
 		packet_create_data_done(&ctx->queue, ctx->peer);
 		peer_put(ctx->peer);
-
-		spin_lock_bh(&wg->encryption_queue_lock);
-		/* We cannot do list_next_entry(ctx) after freeing ctx, but
-		 * list_next_entry(list_prev_entry(ctx)) is equivalent. */
-		prev = list_prev_entry(ctx, list);
-		list_del(&ctx->list);
-		kmem_cache_free(crypt_ctx_cache, ctx);
-		ctx = prev;
+		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
 	}
-	spin_unlock_bh(&wg->encryption_queue_lock);
 }
 
 void packet_encryption_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx;
+	struct crypt_ctx *ctx = NULL;
 	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
 
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_for_each_entry(ctx, &wg->encryption_queue, list) {
-		if (ctx->state != CTX_INITIALIZED)
-			continue;
-		ctx->state = CTX_ENCRYPTING;
-		spin_unlock_bh(&wg->encryption_queue_lock);
-
+	while ((ctx = claim_next_ctx(&wg->encryption_queue, ctx, NULL, CTX_INITIALIZED)) != NULL) {
 		queue_encrypt_reset(&ctx->queue, ctx->keypair);
-
-		spin_lock_bh(&wg->encryption_queue_lock);
-		ctx->state = CTX_ENCRYPTED;
+		atomic_set(&ctx->state, CTX_ENCRYPTED);
 		queue_work_on(choose_cpu(ctx->keypair->remote_index), wg->crypt_wq, &ctx->peer->packet_transmission_work);
 	}
-	spin_unlock_bh(&wg->encryption_queue_lock);
 }
 
 void packet_initialization_worker(struct work_struct *work)
 {
-	bool success;
-	struct crypt_ctx *ctx;
+	struct crypt_ctx *ctx = NULL;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_initialization_work);
 	struct wireguard_device *wg = peer->device;
 
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_for_each_entry(ctx, &wg->encryption_queue, list) {
-		if (ctx->peer != peer || ctx->state != CTX_NEW)
-			continue;
-		ctx->state = CTX_INITIALIZING;
-		spin_unlock_bh(&wg->encryption_queue_lock);
-
-		success = queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair);
-		if (!success)
-			packet_queue_handshake_initiation(peer, false);
-
-		spin_lock_bh(&wg->encryption_queue_lock);
-		ctx->state = success ? CTX_INITIALIZED : CTX_NEW;
-		if (success)
+	while ((ctx = claim_next_ctx(&wg->encryption_queue, ctx, peer, CTX_NEW)) != NULL) {
+		bool success = queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair);
+		if (likely(success)) {
+			atomic_set(&ctx->state, CTX_INITIALIZED);
 			queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
+		} else {
+			atomic_set(&ctx->state, CTX_NEW);
+			packet_queue_handshake_initiation(peer, false);
+		}
 	}
-	spin_unlock_bh(&wg->encryption_queue_lock);
 }
 
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
@@ -376,11 +348,8 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 			skb_orphan(skb);
 		packet_queue_handshake_initiation(peer, false);
 	}
-	ctx->state = state;
-
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_add_tail(&ctx->list, &wg->encryption_queue);
-	spin_unlock_bh(&wg->encryption_queue_lock);
+	atomic_set(&ctx->state, state);
+	enqueue_ctx(&wg->encryption_queue, ctx);
 
 	/* Initialization can only happen aftere receiving a handshake response,
 	 * so there is no point in queueing that work here. */
@@ -392,24 +361,28 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 
 void packet_queue_purge(struct wireguard_peer *peer)
 {
+	int state;
 	struct crypt_ctx *ctx;
-	struct wireguard_device *wg = peer->device;
 
-	spin_lock_bh(&wg->encryption_queue_lock);
-	list_for_each_entry(ctx, &wg->encryption_queue, list) {
-		if (ctx->peer == peer) {
-			/* We can't throw away a packet that's currently being processed. */
-			if (ctx->state == CTX_INITIALIZING || ctx->state == CTX_ENCRYPTING || ctx->state == CTX_SENDING)
-				continue;
-			if (ctx->state < CTX_ENCRYPTED)
-				noise_keypair_put(ctx->keypair);
-			peer_put(ctx->peer);
-			list_del(&ctx->list);
-			skb_queue_purge(&ctx->queue);
-			kmem_cache_free(crypt_ctx_cache, ctx);
-		}
+	rcu_read_lock_bh();
+	list_for_each_entry_rcu(ctx, &peer->device->encryption_queue, list) {
+		if (ctx->peer != peer)
+			continue;
+		state = atomic_read(&ctx->state);
+		/* We can't throw away a ctx that's currently being processed. */
+		if (state == CTX_INITIALIZING || state == CTX_ENCRYPTING || state == CTX_FREEING)
+			continue;
+		/* Claim this ctx so it doesn't start being processed. */
+		if (atomic_cmpxchg(&ctx->state, state, CTX_FREEING) != state)
+			continue;
+		if (state != CTX_ENCRYPTED)
+			noise_keypair_put(ctx->keypair);
+		peer_put(ctx->peer);
+		skb_queue_purge(&ctx->queue);
+		del_ctx(ctx);
+		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
 	}
-	spin_unlock_bh(&wg->encryption_queue_lock);
+	rcu_read_unlock_bh();
 }
 
 static void begin_decrypt_packet(struct decryption_ctx *ctx)

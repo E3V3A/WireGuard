@@ -13,26 +13,9 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 
-enum {
-	CTX_NEW = 0,
-	CTX_INITIALIZING,
-	CTX_INITIALIZED,
-	CTX_ENCRYPTING,
-	CTX_ENCRYPTED,
-	CTX_SENDING,
-};
-
 struct wireguard_device;
 struct wireguard_peer;
 struct sk_buff;
-
-struct crypt_ctx {
-	struct list_head list;
-	struct sk_buff_head queue;
-	struct wireguard_peer *peer;
-	struct noise_keypair *keypair;
-	int state;
-};
 
 struct packet_cb {
 	u64 nonce;
