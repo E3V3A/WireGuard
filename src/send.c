@@ -108,7 +108,7 @@ static inline void keep_key_fresh(struct wireguard_peer *peer)
 
 static inline bool peer_has_queued_packets(struct wireguard_peer *peer)
 {
-	struct encryption_ctx *ctx;
+	struct crypt_ctx *ctx;
 	struct wireguard_device *wg = peer->device;
 
 	spin_lock_bh(&wg->encryption_queue_lock);

@@ -26,7 +26,7 @@ struct wireguard_device;
 struct wireguard_peer;
 struct sk_buff;
 
-struct encryption_ctx {
+struct crypt_ctx {
 	struct list_head list;
 	struct sk_buff_head queue;
 	struct wireguard_peer *peer;

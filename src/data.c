@@ -22,20 +22,20 @@ struct decryption_ctx {
 	struct noise_keypair *keypair;
 };
 
-static struct kmem_cache *encryption_ctx_cache __read_mostly;
+static struct kmem_cache *crypt_ctx_cache __read_mostly;
 #ifdef CONFIG_WIREGUARD_PARALLEL
 static struct kmem_cache *decryption_ctx_cache __read_mostly;
 #endif
 
 int __init packet_init_data_caches(void)
 {
-	encryption_ctx_cache = KMEM_CACHE(encryption_ctx, 0);
-	if (!encryption_ctx_cache)
+	crypt_ctx_cache = KMEM_CACHE(crypt_ctx, 0);
+	if (!crypt_ctx_cache)
 		return -ENOMEM;
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	decryption_ctx_cache = KMEM_CACHE(decryption_ctx, 0);
 	if (!decryption_ctx_cache) {
-		kmem_cache_destroy(encryption_ctx_cache);
+		kmem_cache_destroy(crypt_ctx_cache);
 		return -ENOMEM;
 	}
 #endif
@@ -44,7 +44,7 @@ int __init packet_init_data_caches(void)
 
 void packet_deinit_data_caches(void)
 {
-	kmem_cache_destroy(encryption_ctx_cache);
+	kmem_cache_destroy(crypt_ctx_cache);
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	kmem_cache_destroy(decryption_ctx_cache);
 #endif
@@ -281,7 +281,7 @@ static inline int next_cpu(int *next)
 
 void packet_transmission_worker(struct work_struct *work)
 {
-	struct encryption_ctx *ctx, *prev;
+	struct crypt_ctx *ctx, *prev;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_transmission_work);
 	struct wireguard_device *wg = peer->device;
 
@@ -304,7 +304,7 @@ void packet_transmission_worker(struct work_struct *work)
 		 * list_next_entry(list_prev_entry(ctx)) is equivalent. */
 		prev = list_prev_entry(ctx, list);
 		list_del(&ctx->list);
-		kmem_cache_free(encryption_ctx_cache, ctx);
+		kmem_cache_free(crypt_ctx_cache, ctx);
 		ctx = prev;
 	}
 	spin_unlock_bh(&wg->encryption_queue_lock);
@@ -312,7 +312,7 @@ void packet_transmission_worker(struct work_struct *work)
 
 void packet_encryption_worker(struct work_struct *work)
 {
-	struct encryption_ctx *ctx;
+	struct crypt_ctx *ctx;
 	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
 
 	spin_lock_bh(&wg->encryption_queue_lock);
@@ -334,7 +334,7 @@ void packet_encryption_worker(struct work_struct *work)
 void packet_initialization_worker(struct work_struct *work)
 {
 	bool success;
-	struct encryption_ctx *ctx;
+	struct crypt_ctx *ctx;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_initialization_work);
 	struct wireguard_device *wg = peer->device;
 
@@ -360,7 +360,7 @@ void packet_initialization_worker(struct work_struct *work)
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 {
 	int state;
-	struct encryption_ctx *ctx = kmem_cache_alloc(encryption_ctx_cache, GFP_ATOMIC);
+	struct crypt_ctx *ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
 	struct sk_buff *skb;
 	struct wireguard_device *wg = peer->device;
 
@@ -392,7 +392,7 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 
 void packet_queue_purge(struct wireguard_peer *peer)
 {
-	struct encryption_ctx *ctx;
+	struct crypt_ctx *ctx;
 	struct wireguard_device *wg = peer->device;
 
 	spin_lock_bh(&wg->encryption_queue_lock);
@@ -406,7 +406,7 @@ void packet_queue_purge(struct wireguard_peer *peer)
 			peer_put(ctx->peer);
 			list_del(&ctx->list);
 			skb_queue_purge(&ctx->queue);
-			kmem_cache_free(encryption_ctx_cache, ctx);
+			kmem_cache_free(crypt_ctx_cache, ctx);
 		}
 	}
 	spin_unlock_bh(&wg->encryption_queue_lock);
