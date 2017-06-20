@@ -20,6 +20,11 @@ enum {
 	CTX_ENCRYPTING,
 	CTX_ENCRYPTED,
 	CTX_FREEING,
+
+	CRX_NEW = 16,
+	CRX_DECRYPTING,
+	CRX_DECRYPTED,
+	CRX_FREEING,
 };
 
 struct crypt_ctx {
