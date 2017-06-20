@@ -8,7 +8,6 @@
 #include "socket.h"
 
 #include <linux/types.h>
-#include <linux/padata.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -37,8 +36,6 @@ void packet_send_handshake_cookie(struct wireguard_device *wg, struct sk_buff *i
 void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *peer);
 
 /* data.c */
-int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer);
-void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg);
 
 /* Returns either the correct skb->protocol value, or 0 if invalid. */
 static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
@@ -53,9 +50,14 @@ static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
 int packet_init_data_caches(void);
 void packet_deinit_data_caches(void);
 
+void packet_transmission_worker(struct work_struct *work);
 void packet_encryption_worker(struct work_struct *work);
 void packet_initialization_worker(struct work_struct *work);
-void packet_transmission_worker(struct work_struct *work);
+int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer);
+
+void packet_consumption_worker(struct work_struct *work);
+void packet_decryption_worker(struct work_struct *work);
+void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg);
 
 void peer_purge_queues(struct wireguard_peer *peer);
 

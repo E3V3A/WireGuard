@@ -13,7 +13,6 @@
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
-#include <linux/padata.h>
 
 struct wireguard_device;
 struct handshake_worker {
@@ -46,12 +45,9 @@ struct wireguard_device {
 	struct mutex device_update_lock;
 	struct mutex socket_update_lock;
 	struct workqueue_struct *crypt_wq;
-	int encryption_cpu;
-	struct list_head encryption_queue;
-	struct percpu_worker __percpu *encryption_worker;
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	struct padata_instance *decrypt_pd;
-#endif
+	int encryption_cpu, decryption_cpu;
+	struct list_head encryption_queue, decryption_queue;
+	struct percpu_worker __percpu *encryption_worker, *decryption_worker;
 };
 
 int device_init(void);

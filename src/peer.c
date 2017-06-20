@@ -47,6 +47,7 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 	INIT_WORK(&peer->packet_transmission_work, packet_transmission_worker);
 	INIT_WORK(&peer->packet_initialization_work, packet_initialization_worker);
+	INIT_WORK(&peer->packet_consumption_work, packet_consumption_worker);
 	pr_debug("%s: Peer %Lu created\n", wg->dev->name, peer->internal_id);
 	return peer;
 }

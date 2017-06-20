@@ -341,7 +341,7 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 static void begin_decrypt_packet(struct crypt_ctx *ctx)
 {
 	if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
-		peer_put(ctx->keypair->entry.peer);
+		peer_put(ctx->peer);
 		noise_keypair_put(ctx->keypair);
 		dev_kfree_skb(ctx->skb);
 		ctx->skb = NULL;
@@ -356,40 +356,43 @@ static void finish_decrypt_packet(struct crypt_ctx *ctx)
 		return;
 
 	if (unlikely(!counter_validate(&ctx->keypair->receiving.counter, PACKET_CB(ctx->skb)->nonce))) {
-		net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->keypair->entry.peer->device->dev->name, PACKET_CB(ctx->skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
-		peer_put(ctx->keypair->entry.peer);
+		net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->peer->device->dev->name, PACKET_CB(ctx->skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
+		peer_put(ctx->peer);
 		noise_keypair_put(ctx->keypair);
 		dev_kfree_skb(ctx->skb);
 		return;
 	}
 
-	used_new_key = noise_received_with_keypair(&ctx->keypair->entry.peer->keypairs, ctx->keypair);
+	used_new_key = noise_received_with_keypair(&ctx->peer->keypairs, ctx->keypair);
 	skb_reset(ctx->skb);
-	packet_consume_data_done(ctx->skb, ctx->keypair->entry.peer, &ctx->endpoint, used_new_key);
+	packet_consume_data_done(ctx->skb, ctx->peer, &ctx->endpoint, used_new_key);
 	noise_keypair_put(ctx->keypair);
 }
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
-static void begin_parallel_decryption(struct padata_priv *padata)
+void packet_consumption_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx = container_of(padata, struct crypt_ctx, padata);
-#if IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && defined(CONFIG_ARM)
-	local_bh_enable();
-#endif
-	begin_decrypt_packet(ctx);
-#if IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && defined(CONFIG_ARM)
-	local_bh_disable();
-#endif
-	padata_do_serial(padata);
+	struct crypt_ctx *ctx;
+	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_consumption_work);
+
+	while ((ctx = dequeue_ctx(&peer->device->decryption_queue, peer, CRX_DECRYPTED)) != NULL) {
+		finish_decrypt_packet(ctx);
+		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+	}
 }
 
-static void finish_parallel_decryption(struct padata_priv *padata)
+void packet_decryption_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx = container_of(padata, struct crypt_ctx, padata);
-	finish_decrypt_packet(ctx);
-	kmem_cache_free(crypt_ctx_cache, ctx);
+	struct crypt_ctx *ctx = NULL;
+	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
+
+	while ((ctx = claim_next_ctx(&wg->decryption_queue, ctx, NULL, CRX_NEW)) != NULL) {
+		__le32 idx = ((struct message_data *)ctx->skb->data)->key_idx;
+
+		begin_decrypt_packet(ctx);
+		atomic_set(&ctx->state, CRX_DECRYPTED);
+		queue_work_on(choose_cpu(idx), wg->crypt_wq, &ctx->peer->packet_consumption_work);
+	}
 }
-#endif
 
 void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 {
@@ -399,48 +402,57 @@ void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 	rcu_read_lock_bh();
 	keypair = noise_keypair_get((struct noise_keypair *)index_hashtable_lookup(&wg->index_hashtable, INDEX_HASHTABLE_KEYPAIR, idx));
 	rcu_read_unlock_bh();
-	if (unlikely(!keypair))
-		goto err;
+	if (unlikely(!keypair)) {
+		dev_kfree_skb(skb);
+		return;
+	}
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
 	if (cpumask_weight(cpu_online_mask) > 1) {
 		struct crypt_ctx *ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
 		if (unlikely(!ctx))
-			goto err_peer;
+			goto serial;
+		ctx->peer = keypair->entry.peer;
 		ctx->skb = skb;
 		ctx->keypair = keypair;
-		memset(&ctx->padata, 0, sizeof(ctx->padata));
-		ctx->padata.parallel = begin_parallel_decryption;
-		ctx->padata.serial = finish_parallel_decryption;
-		if (unlikely(padata_do_parallel(wg->decrypt_pd, &ctx->padata, choose_cpu(idx)))) {
-			kmem_cache_free(crypt_ctx_cache, ctx);
-			goto err_peer;
-		}
+		atomic_set(&ctx->state, CRX_NEW);
+		enqueue_ctx(&wg->decryption_queue, ctx);
+		queue_work_on_next_cpu(&wg->decryption_cpu, wg->crypt_wq, wg->decryption_worker);
 	} else
-#endif
+serial:
 	{
 		struct crypt_ctx ctx = {
+			.peer = keypair->entry.peer,
 			.skb = skb,
 			.keypair = keypair
 		};
 		begin_decrypt_packet(&ctx);
 		finish_decrypt_packet(&ctx);
 	}
-	return;
-
-#ifdef CONFIG_WIREGUARD_PARALLEL
-err_peer:
-	peer_put(keypair->entry.peer);
-	noise_keypair_put(keypair);
-#endif
-err:
-	dev_kfree_skb(skb);
 }
 
 void peer_purge_queues(struct wireguard_peer *peer)
 {
 	int state;
 	struct crypt_ctx *ctx;
+
+	rcu_read_lock_bh();
+	list_for_each_entry_rcu(ctx, &peer->device->decryption_queue, list) {
+		if (ctx->peer != peer)
+			continue;
+		state = atomic_read(&ctx->state);
+		/* We can't throw away a ctx that's currently being processed. */
+		if (state == CRX_DECRYPTING || state == CRX_FREEING)
+			continue;
+		/* Claim this ctx so it doesn't start being processed. */
+		if (atomic_cmpxchg(&ctx->state, state, CRX_FREEING) != state)
+			continue;
+		noise_keypair_put(ctx->keypair);
+		peer_put(ctx->peer);
+		dev_kfree_skb(ctx->skb);
+		del_ctx(ctx);
+		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+	}
+	rcu_read_unlock_bh();
 
 	rcu_read_lock_bh();
 	list_for_each_entry_rcu(ctx, &peer->device->encryption_queue, list) {

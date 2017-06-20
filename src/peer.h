@@ -52,7 +52,7 @@ struct wireguard_peer {
 	struct rcu_head rcu;
 	struct list_head peer_list;
 	u64 internal_id;
-	struct work_struct packet_initialization_work, packet_transmission_work;
+	struct work_struct packet_initialization_work, packet_transmission_work, packet_consumption_work;
 };
 
 struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_key[NOISE_PUBLIC_KEY_LEN], const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);

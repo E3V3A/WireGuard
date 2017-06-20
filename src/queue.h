@@ -34,7 +34,6 @@ struct crypt_ctx {
 	union {
 		struct sk_buff_head queue;
 		struct {
-			struct padata_priv padata;
 			struct sk_buff *skb;
 			struct endpoint endpoint;
 		};

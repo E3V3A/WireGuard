@@ -223,10 +223,8 @@ static void destruct(struct net_device *dev)
 	wg->incoming_port = 0;
 	destroy_workqueue(wg->incoming_handshake_wq);
 	destroy_workqueue(wg->peer_wq);
+	free_percpu(wg->decryption_worker);
 	free_percpu(wg->encryption_worker);
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	padata_free(wg->decrypt_pd);
-#endif
 	destroy_workqueue(wg->crypt_wq);
 	routing_table_free(&wg->peer_routing_table);
 	ratelimiter_uninit();
@@ -322,12 +320,14 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		INIT_WORK(&per_cpu_ptr(wg->encryption_worker, cpu)->work, packet_encryption_worker);
 	}
 
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	wg->decrypt_pd = padata_alloc_possible(wg->crypt_wq);
-	if (!wg->decrypt_pd)
+	INIT_LIST_HEAD(&wg->decryption_queue);
+	wg->decryption_worker = alloc_percpu(struct percpu_worker);
+	if (!wg->decryption_worker)
 		goto error_7;
-	padata_start(wg->decrypt_pd);
-#endif
+	for_each_possible_cpu (cpu) {
+		per_cpu_ptr(wg->decryption_worker, cpu)->wg = wg;
+		INIT_WORK(&per_cpu_ptr(wg->decryption_worker, cpu)->work, packet_decryption_worker);
+	}
 
 	ret = ratelimiter_init();
 	if (ret < 0)
@@ -349,10 +349,8 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 error_9:
 	ratelimiter_uninit();
 error_8:
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	padata_free(wg->decrypt_pd);
+	free_percpu(wg->decryption_worker);
 error_7:
-#endif
 	free_percpu(wg->encryption_worker);
 error_6:
 	destroy_workqueue(wg->crypt_wq);
