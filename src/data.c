@@ -359,32 +359,6 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 	return 0;
 }
 
-void packet_queue_purge(struct wireguard_peer *peer)
-{
-	int state;
-	struct crypt_ctx *ctx;
-
-	rcu_read_lock_bh();
-	list_for_each_entry_rcu(ctx, &peer->device->encryption_queue, list) {
-		if (ctx->peer != peer)
-			continue;
-		state = atomic_read(&ctx->state);
-		/* We can't throw away a ctx that's currently being processed. */
-		if (state == CTX_INITIALIZING || state == CTX_ENCRYPTING || state == CTX_FREEING)
-			continue;
-		/* Claim this ctx so it doesn't start being processed. */
-		if (atomic_cmpxchg(&ctx->state, state, CTX_FREEING) != state)
-			continue;
-		if (state != CTX_ENCRYPTED)
-			noise_keypair_put(ctx->keypair);
-		peer_put(ctx->peer);
-		skb_queue_purge(&ctx->queue);
-		del_ctx(ctx);
-		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
-	}
-	rcu_read_unlock_bh();
-}
-
 static void begin_decrypt_packet(struct decryption_ctx *ctx)
 {
 	if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
@@ -482,4 +456,30 @@ err_peer:
 #endif
 err:
 	dev_kfree_skb(skb);
+}
+
+void peer_purge_queues(struct wireguard_peer *peer)
+{
+	int state;
+	struct crypt_ctx *ctx;
+
+	rcu_read_lock_bh();
+	list_for_each_entry_rcu(ctx, &peer->device->encryption_queue, list) {
+		if (ctx->peer != peer)
+			continue;
+		state = atomic_read(&ctx->state);
+		/* We can't throw away a ctx that's currently being processed. */
+		if (state == CTX_INITIALIZING || state == CTX_ENCRYPTING || state == CTX_FREEING)
+			continue;
+		/* Claim this ctx so it doesn't start being processed. */
+		if (atomic_cmpxchg(&ctx->state, state, CTX_FREEING) != state)
+			continue;
+		if (state != CTX_ENCRYPTED)
+			noise_keypair_put(ctx->keypair);
+		peer_put(ctx->peer);
+		skb_queue_purge(&ctx->queue);
+		del_ctx(ctx);
+		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+	}
+	rcu_read_unlock_bh();
 }

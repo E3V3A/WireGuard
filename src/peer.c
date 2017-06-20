@@ -83,7 +83,7 @@ void peer_remove(struct wireguard_peer *peer)
 	pubkey_hashtable_remove(&peer->device->peer_hashtable, peer);
 	if (peer->device->peer_wq)
 		flush_workqueue(peer->device->peer_wq);
-	packet_queue_purge(peer);
+	peer_purge_queues(peer);
 	peer_put(peer);
 }
 
@@ -91,7 +91,7 @@ static void rcu_release(struct rcu_head *rcu)
 {
 	struct wireguard_peer *peer = container_of(rcu, struct wireguard_peer, rcu);
 	pr_debug("%s: Peer %Lu (%pISpfsc) destroyed\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
-	packet_queue_purge(peer);
+	peer_purge_queues(peer);
 	dst_cache_destroy(&peer->endpoint_cache);
 	kzfree(peer);
 }

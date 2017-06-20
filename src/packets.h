@@ -39,7 +39,6 @@ void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *
 /* data.c */
 int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer);
 void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg);
-void packet_queue_purge(struct wireguard_peer *peer);
 
 /* Returns either the correct skb->protocol value, or 0 if invalid. */
 static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
@@ -57,6 +56,8 @@ void packet_deinit_data_caches(void);
 void packet_encryption_worker(struct work_struct *work);
 void packet_initialization_worker(struct work_struct *work);
 void packet_transmission_worker(struct work_struct *work);
+
+void peer_purge_queues(struct wireguard_peer *peer);
 
 #ifdef DEBUG
 bool packet_counter_selftest(void);
