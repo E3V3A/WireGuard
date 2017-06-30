@@ -36,6 +36,8 @@ void packet_send_handshake_cookie(struct wireguard_device *wg, struct sk_buff *i
 void packet_create_data_done(struct sk_buff_head *queue, struct wireguard_peer *peer);
 
 /* data.c */
+int init_crypt_cache(void);
+void deinit_crypt_cache(void);
 
 /* Returns either the correct skb->protocol value, or 0 if invalid. */
 static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
@@ -46,9 +48,6 @@ static inline __be16 skb_examine_untrusted_ip_hdr(struct sk_buff *skb)
 		return htons(ETH_P_IPV6);
 	return 0;
 }
-
-int packet_init_data_caches(void);
-void packet_deinit_data_caches(void);
 
 void packet_transmission_worker(struct work_struct *work);
 void packet_encryption_worker(struct work_struct *work);

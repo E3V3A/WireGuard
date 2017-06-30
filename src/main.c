@@ -27,7 +27,7 @@ static int __init mod_init(void)
 #endif
 	noise_init();
 
-	ret = packet_init_data_caches();
+	ret = init_crypt_cache();
 	if (ret < 0)
 		goto err_packet;
 
@@ -41,7 +41,7 @@ static int __init mod_init(void)
 	return 0;
 
 err_device:
-	packet_deinit_data_caches();
+	deinit_crypt_cache();
 err_packet:
 	return ret;
 }
@@ -49,7 +49,7 @@ err_packet:
 static void __exit mod_exit(void)
 {
 	device_uninit();
-	packet_deinit_data_caches();
+	deinit_crypt_cache();
 	pr_debug("WireGuard unloaded\n");
 }
 

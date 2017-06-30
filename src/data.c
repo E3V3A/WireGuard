@@ -18,7 +18,7 @@
 
 static struct kmem_cache *crypt_ctx_cache __read_mostly;
 
-int __init packet_init_data_caches(void)
+int __init init_crypt_cache(void)
 {
 	crypt_ctx_cache = KMEM_CACHE(crypt_ctx, 0);
 	if (!crypt_ctx_cache)
@@ -26,7 +26,7 @@ int __init packet_init_data_caches(void)
 	return 0;
 }
 
-void packet_deinit_data_caches(void)
+void deinit_crypt_cache(void)
 {
 	kmem_cache_destroy(crypt_ctx_cache);
 }
