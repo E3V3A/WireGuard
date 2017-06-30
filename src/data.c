@@ -58,6 +58,35 @@ void packet_free_crypt_ctx(struct rcu_head *head)
 	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 
+static inline unsigned int choose_cpu(__le32 key)
+{
+	unsigned int cpu_index, cpu, cb_cpu;
+
+	/* This ensures that packets encrypted to the same key are sent in-order. */
+	cpu_index = ((__force unsigned int)key) % cpumask_weight(cpu_online_mask);
+	cb_cpu = cpumask_first(cpu_online_mask);
+	for (cpu = 0; cpu < cpu_index; ++cpu)
+		cb_cpu = cpumask_next(cb_cpu, cpu_online_mask);
+
+	return cb_cpu;
+}
+
+static inline int next_cpu(int *next)
+{
+	int cpu = *next;
+
+	if (cpu >= nr_cpumask_bits || !cpumask_test_cpu(cpu, cpu_online_mask))
+		cpu = cpumask_first(cpu_online_mask);
+	*next = cpumask_next(cpu, cpu_online_mask);
+
+	return cpu;
+}
+
+#define queue_work_on_next_cpu(cpu, wq, ws) ({ \
+	int __cpu = next_cpu(cpu); \
+	queue_work_on(__cpu, wq, &per_cpu_ptr(ws, __cpu)->work); \
+})
+
 /* This is RFC6479, a replay detection bitmap algorithm that avoids bitshifts */
 static inline bool counter_validate(union noise_counter *counter, u64 their_counter)
 {
@@ -256,36 +285,6 @@ static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_
 	chacha20poly1305_deinit_simd(have_simd);
 	noise_keypair_put(keypair);
 }
-
-static inline unsigned int choose_cpu(__le32 key)
-{
-	unsigned int cpu_index, cpu, cb_cpu;
-
-	/* This ensures that packets encrypted to the same key are sent in-order. */
-	cpu_index = ((__force unsigned int)key) % cpumask_weight(cpu_online_mask);
-	cb_cpu = cpumask_first(cpu_online_mask);
-	for (cpu = 0; cpu < cpu_index; ++cpu)
-		cb_cpu = cpumask_next(cb_cpu, cpu_online_mask);
-
-	return cb_cpu;
-}
-
-static inline int next_cpu(int *next)
-{
-	int cpu = *next;
-
-	if (cpu >= nr_cpumask_bits || !cpumask_test_cpu(cpu, cpu_online_mask))
-		cpu = cpumask_first(cpu_online_mask);
-	*next = cpumask_next(cpu, cpu_online_mask);
-
-	return cpu;
-}
-
-#define queue_work_on_next_cpu(cpu, wq, ws) \
-({ \
-	int __cpu = next_cpu(cpu); \
-	queue_work_on(__cpu, wq, &per_cpu_ptr(ws, __cpu)->work); \
-})
 
 void packet_transmission_worker(struct work_struct *work)
 {
