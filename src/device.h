@@ -22,7 +22,6 @@ struct handshake_worker {
 
 struct crypt_queue {
 	struct list_head list;
-	struct wireguard_device *wg;
 	struct work_struct work;
 };
 

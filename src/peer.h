@@ -29,11 +29,6 @@ struct endpoint {
 	};
 };
 
-struct peer_queue {
-	struct list_head list;
-	spinlock_t lock;
-};
-
 struct wireguard_peer {
 	struct wireguard_device *device;
 	struct endpoint endpoint;
@@ -51,13 +46,14 @@ struct wireguard_peer {
 	unsigned long persistent_keepalive_interval;
 	bool timers_enabled;
 	bool timer_need_another_keepalive;
+	bool timer_purge_uninit_packets;
 	bool sent_lastminute_handshake;
 	struct timeval walltime_last_handshake;
 	struct kref refcount;
 	struct rcu_head rcu;
 	struct list_head peer_list;
 	u64 internal_id;
-	struct peer_queue send_queue, receive_queue;
+	struct list_head init_queue, send_queue, receive_queue;
 	struct work_struct packet_initialization_work, packet_transmission_work, packet_consumption_work;
 };
 

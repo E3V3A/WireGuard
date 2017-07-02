@@ -316,7 +316,6 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		goto error_6;
 	for_each_possible_cpu (cpu) {
 		INIT_LIST_HEAD(&per_cpu_ptr(wg->encrypt_queue, cpu)->list);
-		per_cpu_ptr(wg->encrypt_queue, cpu)->wg = wg;
 		INIT_WORK(&per_cpu_ptr(wg->encrypt_queue, cpu)->work, packet_encryption_worker);
 	}
 
@@ -325,7 +324,6 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		goto error_7;
 	for_each_possible_cpu (cpu) {
 		INIT_LIST_HEAD(&per_cpu_ptr(wg->decrypt_queue, cpu)->list);
-		per_cpu_ptr(wg->decrypt_queue, cpu)->wg = wg;
 		INIT_WORK(&per_cpu_ptr(wg->decrypt_queue, cpu)->work, packet_decryption_worker);
 	}
 

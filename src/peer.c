@@ -45,10 +45,9 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	kref_init(&peer->refcount);
 	pubkey_hashtable_add(&wg->peer_hashtable, peer);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
-	INIT_LIST_HEAD(&peer->send_queue.list);
-	spin_lock_init(&peer->send_queue.lock);
-	INIT_LIST_HEAD(&peer->receive_queue.list);
-	spin_lock_init(&peer->receive_queue.lock);
+	INIT_LIST_HEAD(&peer->init_queue);
+	INIT_LIST_HEAD(&peer->send_queue);
+	INIT_LIST_HEAD(&peer->receive_queue);
 	INIT_WORK(&peer->packet_transmission_work, packet_transmission_worker);
 	INIT_WORK(&peer->packet_initialization_work, packet_initialization_worker);
 	INIT_WORK(&peer->packet_consumption_work, packet_consumption_worker);
@@ -86,6 +85,7 @@ void peer_remove(struct wireguard_peer *peer)
 	timers_uninit_peer(peer);
 	routing_table_remove_by_peer(&peer->device->peer_routing_table, peer);
 	pubkey_hashtable_remove(&peer->device->peer_hashtable, peer);
+	flush_workqueue(peer->device->crypt_wq);
 	if (peer->device->peer_wq)
 		flush_workqueue(peer->device->peer_wq);
 	peer_purge_queues(peer);
@@ -96,7 +96,6 @@ static void rcu_release(struct rcu_head *rcu)
 {
 	struct wireguard_peer *peer = container_of(rcu, struct wireguard_peer, rcu);
 	pr_debug("%s: Peer %Lu (%pISpfsc) destroyed\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
-	peer_purge_queues(peer);
 	dst_cache_destroy(&peer->endpoint_cache);
 	kzfree(peer);
 }

@@ -111,7 +111,7 @@ void packet_send_keepalive(struct wireguard_peer *peer)
 	struct sk_buff *skb;
 	struct sk_buff_head queue;
 
-	if (!list_empty(&peer->send_queue.list)) {
+	if (!list_empty(&peer->init_queue)) {
 		/* There are packets pending which need to be initialized with the new keypair. */
 		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
 	} else {
