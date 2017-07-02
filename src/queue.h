@@ -4,154 +4,178 @@
 #define WGQUEUE_H
 
 #include <linux/kernel.h>
+#include <linux/skbuff.h>
 
 #include "device.h"
+#include "peer.h"
 
-/**
- * The helper functions in this file rely on these states being in increasing
- * order of the way packets are processed, and they must alternate between in-
- * progress and completed states. The exception is CTX_FREEING, because it does
- * not use these helpers.
- */
 enum {
-	CTX_NEW = 0,
+	CTX_ANY,
+	CTX_NEW,
 	CTX_INITIALIZING,
 	CTX_INITIALIZED,
-	CTX_ENCRYPTING,
 	CTX_ENCRYPTED,
+	CTX_DECRYPTED,
 	CTX_FREEING,
-
-	CRX_NEW = 16,
-	CRX_DECRYPTING,
-	CRX_DECRYPTED,
-	CRX_FREEING,
 };
 
 struct crypt_ctx {
-	struct list_head list;
-	struct wireguard_peer *peer;
-	struct noise_keypair *keypair;
+	struct list_head peer_list;
+	struct list_head shared_list;
 	union {
 		struct sk_buff_head queue;
-		struct {
-			struct sk_buff *skb;
-			struct endpoint endpoint;
-		};
+		struct sk_buff *skb;
 	};
-	struct rcu_head rcu;
+	struct wireguard_peer *peer;
+	struct noise_keypair *keypair;
+	struct endpoint endpoint;
 	atomic_t state;
 };
 
 /**
- * Use this helper to ensure safe traversal of the queue looking for a context
- * to process. It returns the address of a succesfully-claimed context, or
- * NULL if no context with the appropriate peer and state was found. The
- * first time around, pos should be set to NULL. Set peer to NULL to get
- * packets of the appropriate state for any peer.
+ * crypt_dequeue_ctx - Dequeue a ctx from a device-shared encryption/decryption
+ * queue.
+ *
+ * This function is safe to execute concurrently with any number of
+ * crypt_enqueue_ctx() calls, but *not* with another crypt_dequeue_ctx() call
+ * operating on the same queue.
  */
-static inline struct crypt_ctx *claim_next_ctx(struct list_head *queue,
-					       struct crypt_ctx *pos,
-					       struct wireguard_peer *peer,
-					       int state)
+static inline struct crypt_ctx *crypt_dequeue_ctx(struct crypt_queue *queue)
 {
 	struct crypt_ctx *ctx;
+	struct list_head *first, *second;
 
-	/* Due to the lack of list_for_each_entry_from_rcu(), play dirty tricks
-	 * with container_of() to get the list head as a "crypt_ctx". */
-	ctx = pos ? pos : container_of(queue, struct crypt_ctx, list);
-	rcu_read_lock_bh();
-	list_for_each_entry_continue_rcu(ctx, queue, list) {
-		/* Ignore contexts for other peers if given a specific peer. */
-		if (peer && ctx->peer != peer)
-			continue;
-		/* Marking the context "in progress" guarantees its lifetime. */
-		if (atomic_cmpxchg(&ctx->state, state, state + 1) == state) {
-			rcu_read_unlock_bh();
-			return ctx;
-		}
-	}
-	rcu_read_unlock_bh();
-
-	return NULL;
-}
-
-/**
- * Must be called with RCU read lock held.
- */
-static inline void del_ctx(struct crypt_ctx *ctx)
-{
-	struct list_head *next, *prev;
-
-	do {
-		prev = ctx->list.prev;
-		next = list_next_rcu(&ctx->list);
-		rcu_assign_pointer(list_next_rcu(prev), next);
-	} while (cmpxchg(&next->prev, &ctx->list, prev) != &ctx->list);
-}
-
-static inline struct crypt_ctx *dequeue_ctx(struct list_head *queue,
-					    struct wireguard_peer *peer,
-					    int state)
-{
-	struct crypt_ctx *ctx;
-
-	/* We need to ensure the lifetimes here and in del_ctx(). */
-	rcu_read_lock_bh();
-	ctx = list_first_or_null_rcu(queue, struct crypt_ctx, list);
-	while (ctx && ctx->peer != peer)
-		ctx = list_next_or_null_rcu(queue, &ctx->list,
-					    struct crypt_ctx, list);
-	/* Don't traverse past ctx's for this peer with other states. This helps
-	 * avoid out-of-order delivery. */
-	if (!ctx || atomic_read(&ctx->state) != state) {
-		rcu_read_unlock_bh();
+	first = READ_ONCE(queue->list.next);
+	if (first == &queue->list)
 		return NULL;
-	}
-	del_ctx(ctx);
-	rcu_read_unlock_bh();
+	do {
+		second = READ_ONCE(first->next);
+		WRITE_ONCE(queue->list.next, second);
+	} while (cmpxchg(&second->prev, first, &queue->list) != first);
+	ctx = list_entry(first, struct crypt_ctx, shared_list);
+	INIT_LIST_HEAD(&ctx->shared_list);
 
 	return ctx;
 }
 
 /**
- * ctx->state must be set correctly before calling this helper.
+ * crypt_enqueue_ctx - Enqueue a ctx for encryption/decryption.
+ *
+ * This function is safe to execute concurrently with any number of other
+ * crypt_enqueue_ctx() calls, as well as with one crypt_dequeue_ctx() call
+ * operating on the same queue.
  */
-static inline void enqueue_ctx(struct list_head *queue, struct crypt_ctx *ctx)
+static inline void crypt_enqueue_ctx(struct crypt_queue *queue,
+				     struct crypt_ctx *ctx)
 {
-	struct list_head *prev;
+	struct list_head *last;
 
-	/* The enqueued context will always be last, so this needs no lock. */
-	list_next_rcu(&ctx->list) = queue;
-	/* We need to ensure the lifetime of prev (for all iterations). */
-	rcu_read_lock_bh();
+	ctx->shared_list.next = &queue->list;
 	do {
-		prev = queue->prev;
-		ctx->list.prev = prev;
-	} while (cmpxchg(&queue->prev, prev, &ctx->list) != prev);
-	/* If this is racing with a dequeue_ctx on the adjacent ctx, the cmpxchg
-	 * in dequeue_ctx will fail until the rcu_assign_pointer completes, so
-	 * there's no worry about assigning to a dead object. */
-	rcu_assign_pointer(list_next_rcu(prev), &ctx->list);
-	rcu_read_unlock_bh();
+		last = READ_ONCE(queue->list.prev);
+		ctx->shared_list.prev = last;
+	} while (cmpxchg(&queue->list.prev, last, &ctx->shared_list) != last);
+	WRITE_ONCE(last->next, &ctx->shared_list);
 }
 
 /**
- * Use this helper to test if there are any contexts in the queue owned by this
- * peer. This implicitly means that work is pending for the peer.
+ * peer_claim_ctx - Claim a ctx for a specific processing step.
+ *
+ * @return the address of a succesfully-claimed context, or NULL if no context
+ * with a matching state was found.
+ *
+ * This function should be called first with pos set to NULL to search from the
+ * beginning of the queue.
  */
-static inline bool peer_has_queued_ctx(struct list_head *queue,
-				       struct wireguard_peer *peer)
+static inline struct crypt_ctx *peer_claim_ctx(struct peer_queue *queue,
+					       struct crypt_ctx *pos,
+					       int state,
+					       int new_state)
 {
 	struct crypt_ctx *ctx;
 
-	rcu_read_lock_bh();
-	list_for_each_entry_rcu(ctx, queue, list) {
-		if (ctx->peer == peer) {
-			rcu_read_unlock_bh();
+	/* The starting point is either the previously-returned ctx or the head
+	 * of the list. The list_entry() is undone by l_f_e_entry_continue(). */
+	ctx = pos ? pos : list_entry(&queue->list, struct crypt_ctx, peer_list);
+	/* The lifetimes of list entries before the first claimed one are
+	 * unknown, so if pos is NULL, we have to lock the list to prevent them
+	 * from being dequeued or freed during traversal. */
+	if (!pos)
+		spin_lock(&queue->lock);
+	list_for_each_entry_continue(ctx, &queue->list, peer_list)
+		if (atomic_cmpxchg(&ctx->state, state, new_state) == state)
+			goto found;
+	ctx = NULL;
+found:
+	if (!pos)
+		spin_unlock(&queue->lock);
+
+	return ctx;
+}
+
+/**
+ * peer_dequeue_ctx - Dequeue a ctx for final transmission or consumption.
+ *
+ * @return the address of the dequeued context, or NULL if the first context in
+ * the queue does not have the required state (or the queue is empty).
+ *
+ * The locking in this function is to synchronize with peer_claim_ctx(), not
+ * peer_enqueue_ctx(), so the cmpxchg loop is still necessary. This function is
+ * safe to execute concurrently with any number of peer_enqueue_ctx() calls,
+ * but *not* with another peer_dequeue_ctx() call operating on the same queue.
+ */
+static inline struct crypt_ctx *peer_dequeue_ctx(struct peer_queue *queue,
+						 int state)
+{
+	struct crypt_ctx *ctx;
+	struct list_head *first, *second;
+
+	ctx = list_first_entry_or_null(&queue->list, struct crypt_ctx, peer_list);
+	if (!ctx || (state != CTX_ANY && atomic_read(&ctx->state) != state))
+		return NULL;
+	first = &ctx->peer_list;
+	spin_lock(&queue->lock);
+	do {
+		second = READ_ONCE(first->next);
+		WRITE_ONCE(queue->list.next, second);
+	} while (cmpxchg(&second->prev, first, &queue->list) != first);
+	spin_unlock(&queue->lock);
+
+	return ctx;
+}
+
+/**
+ * peer_enqueue_ctx - Enqueue a ctx for processing (transmission/consumption).
+ *
+ * This function is safe to execute concurrently with any number of other
+ * peer_enqueue_ctx() calls, as well as with one peer_dequeue_ctx() call
+ * operating on the same queue.
+ */
+static inline void peer_enqueue_ctx(struct peer_queue *queue,
+				    struct crypt_ctx *ctx)
+{
+	struct list_head *last;
+
+	ctx->peer_list.next = &queue->list;
+	do {
+		last = READ_ONCE(queue->list.prev);
+		ctx->peer_list.prev = last;
+	} while (cmpxchg(&queue->list.prev, last, &ctx->peer_list) != last);
+	WRITE_ONCE(last->next, &ctx->peer_list);
+}
+
+static inline bool peer_has_uninitialized_packets(struct wireguard_peer *peer)
+{
+	struct crypt_ctx *ctx;
+
+	spin_lock(&peer->send_queue.lock);
+	list_for_each_entry(ctx, &peer->send_queue.list, peer_list) {
+		if (atomic_read(&ctx->state) == CTX_NEW) {
+			spin_unlock(&peer->send_queue.lock);
 			return true;
 		}
 	}
-	rcu_read_unlock_bh();
+	spin_unlock(&peer->send_queue.lock);
 
 	return false;
 }

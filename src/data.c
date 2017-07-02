@@ -31,10 +31,15 @@ void deinit_crypt_cache(void)
 	kmem_cache_destroy(crypt_ctx_cache);
 }
 
-void packet_free_crypt_ctx(struct rcu_head *head)
+static void drop_ctx(struct crypt_ctx *ctx, bool sending)
 {
-	struct crypt_ctx *ctx = container_of(head, struct crypt_ctx, rcu);
-
+	if (!sending)
+		noise_keypair_put(ctx->keypair);
+	peer_put(ctx->peer);
+	if (sending)
+		skb_queue_purge(&ctx->queue);
+	else
+		dev_kfree_skb(ctx->skb);
 	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 
@@ -62,9 +67,12 @@ static inline int next_cpu(int *next)
 	return cpu;
 }
 
-#define queue_work_on_next_cpu(cpu, wq, ws) ({ \
+/* TODO: prevent cpu from going offline while adding to its queue. */
+#define queue_ctx_and_work_on_next_cpu(ctx, wq, queue, cpu) ({ \
 	int __cpu = next_cpu(cpu); \
-	queue_work_on(__cpu, wq, &per_cpu_ptr(ws, __cpu)->work); \
+	struct crypt_queue *__queue = per_cpu_ptr(queue, __cpu); \
+	crypt_enqueue_ctx(__queue, ctx); \
+	queue_work_on(__cpu, wq, &__queue->work); \
 })
 
 /* This is RFC6479, a replay detection bitmap algorithm that avoids bitshifts */
@@ -271,22 +279,34 @@ void packet_transmission_worker(struct work_struct *work)
 	struct crypt_ctx *ctx;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_transmission_work);
 
-	while ((ctx = dequeue_ctx(&peer->device->encryption_queue, peer, CTX_ENCRYPTED)) != NULL) {
+	while ((ctx = peer_dequeue_ctx(&peer->send_queue, CTX_ENCRYPTED)) != NULL) {
 		packet_create_data_done(&ctx->queue, ctx->peer);
 		peer_put(ctx->peer);
-		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+		kmem_cache_free(crypt_ctx_cache, ctx);
 	}
 }
 
 void packet_encryption_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx = NULL;
-	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
+	struct crypt_ctx *ctx;
+	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
 
-	while ((ctx = claim_next_ctx(&wg->encryption_queue, ctx, NULL, CTX_INITIALIZED)) != NULL) {
+	while ((ctx = crypt_dequeue_ctx(queue)) != NULL) {
+		int cpu = choose_cpu(ctx->keypair->remote_index);
+		struct wireguard_peer *peer = ctx->peer;
+
+		if (unlikely(atomic_read(&ctx->state) == CTX_FREEING)) {
+			noise_keypair_put(ctx->keypair);
+			goto drop;
+		}
 		queue_encrypt_reset(&ctx->queue, ctx->keypair);
-		atomic_set(&ctx->state, CTX_ENCRYPTED);
-		queue_work_on(choose_cpu(ctx->keypair->remote_index), wg->crypt_wq, &ctx->peer->packet_transmission_work);
+		if (unlikely(atomic_xchg(&ctx->state, CTX_ENCRYPTED) == CTX_FREEING))
+drop:
+		{
+			drop_ctx(ctx, true);
+			continue;
+		}
+		queue_work_on(cpu, queue->wg->crypt_wq, &peer->packet_transmission_work);
 	}
 }
 
@@ -296,15 +316,26 @@ void packet_initialization_worker(struct work_struct *work)
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_initialization_work);
 	struct wireguard_device *wg = peer->device;
 
-	while ((ctx = claim_next_ctx(&wg->encryption_queue, ctx, peer, CTX_NEW)) != NULL) {
+	while ((ctx = peer_claim_ctx(&peer->send_queue, ctx, CTX_NEW, CTX_INITIALIZING)) != NULL) {
 		bool success = queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair);
+
 		if (likely(success)) {
-			atomic_set(&ctx->state, CTX_INITIALIZED);
-			queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
+			if(unlikely(atomic_xchg(&ctx->state, CTX_INITIALIZED) == CTX_FREEING))
+				goto drop;
+			queue_ctx_and_work_on_next_cpu(ctx, wg->crypt_wq, wg->encrypt_queue, &wg->encrypt_cpu);
 		} else {
-			atomic_set(&ctx->state, CTX_NEW);
+			if(unlikely(atomic_xchg(&ctx->state, CTX_NEW) == CTX_FREEING))
+				goto drop;
 			packet_queue_handshake_initiation(peer, false);
 		}
+		continue;
+
+drop:
+		if (success)
+			noise_keypair_put(ctx->keypair);
+		drop_ctx(ctx, true);
+		/* Somebody's purging the queue we're traversing. */
+		return;
 	}
 }
 
@@ -321,19 +352,19 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 	skb_queue_head_init(&ctx->queue);
 	skb_queue_splice_init(queue, &ctx->queue);
 
-	state = queue_add_keypair_and_nonces(&ctx->queue, peer, &ctx->keypair) ? CTX_INITIALIZED : CTX_NEW;
+	state = queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair) ? CTX_INITIALIZED : CTX_NEW;
 	if (unlikely(state == CTX_NEW)) {
 		skb_queue_walk (&ctx->queue, skb)
 			skb_orphan(skb);
 		packet_queue_handshake_initiation(peer, false);
 	}
 	atomic_set(&ctx->state, state);
-	enqueue_ctx(&wg->encryption_queue, ctx);
+	peer_enqueue_ctx(&peer->send_queue, ctx);
 
 	/* Initialization can only happen aftere receiving a handshake response,
 	 * so there is no point in queueing that work here. */
 	if (likely(state == CTX_INITIALIZED))
-		queue_work_on_next_cpu(&wg->encryption_cpu, wg->crypt_wq, wg->encryption_worker);
+		queue_ctx_and_work_on_next_cpu(ctx, wg->crypt_wq, wg->encrypt_queue, &wg->encrypt_cpu);
 
 	return 0;
 }
@@ -374,23 +405,31 @@ void packet_consumption_worker(struct work_struct *work)
 	struct crypt_ctx *ctx;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_consumption_work);
 
-	while ((ctx = dequeue_ctx(&peer->device->decryption_queue, peer, CRX_DECRYPTED)) != NULL) {
+	while ((ctx = peer_dequeue_ctx(&peer->receive_queue, CTX_DECRYPTED)) != NULL) {
 		finish_decrypt_packet(ctx);
-		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+		kmem_cache_free(crypt_ctx_cache, ctx);
 	}
 }
 
 void packet_decryption_worker(struct work_struct *work)
 {
-	struct crypt_ctx *ctx = NULL;
-	struct wireguard_device *wg = container_of(work, struct percpu_worker, work)->wg;
+	struct crypt_ctx *ctx;
+	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
 
-	while ((ctx = claim_next_ctx(&wg->decryption_queue, ctx, NULL, CRX_NEW)) != NULL) {
+	while ((ctx = crypt_dequeue_ctx(queue)) != NULL) {
 		__le32 idx = ((struct message_data *)ctx->skb->data)->key_idx;
+		struct wireguard_peer *peer = ctx->peer;
 
+		if (unlikely(atomic_read(&ctx->state) == CTX_FREEING)) {
+			drop_ctx(ctx, false);
+			continue;
+		}
 		begin_decrypt_packet(ctx);
-		atomic_set(&ctx->state, CRX_DECRYPTED);
-		queue_work_on(choose_cpu(idx), wg->crypt_wq, &ctx->peer->packet_consumption_work);
+		if (unlikely(atomic_xchg(&ctx->state, CTX_DECRYPTED) == CTX_FREEING)) {
+			drop_ctx(ctx, false);
+			continue;
+		}
+		queue_work_on(choose_cpu(idx), queue->wg->crypt_wq, &peer->packet_consumption_work);
 	}
 }
 
@@ -414,9 +453,9 @@ void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 		ctx->peer = keypair->entry.peer;
 		ctx->skb = skb;
 		ctx->keypair = keypair;
-		atomic_set(&ctx->state, CRX_NEW);
-		enqueue_ctx(&wg->decryption_queue, ctx);
-		queue_work_on_next_cpu(&wg->decryption_cpu, wg->crypt_wq, wg->decryption_worker);
+		atomic_set(&ctx->state, CTX_NEW);
+		peer_enqueue_ctx(&ctx->peer->receive_queue, ctx);
+		queue_ctx_and_work_on_next_cpu(ctx, wg->crypt_wq, wg->decrypt_queue, &wg->decrypt_cpu);
 	} else
 serial:
 	{
@@ -432,45 +471,17 @@ serial:
 
 void peer_purge_queues(struct wireguard_peer *peer)
 {
-	int state;
 	struct crypt_ctx *ctx;
 
-	rcu_read_lock_bh();
-	list_for_each_entry_rcu(ctx, &peer->device->decryption_queue, list) {
-		if (ctx->peer != peer)
-			continue;
-		state = atomic_read(&ctx->state);
-		/* We can't throw away a ctx that's currently being processed. */
-		if (state == CRX_DECRYPTING || state == CRX_FREEING)
-			continue;
-		/* Claim this ctx so it doesn't start being processed. */
-		if (atomic_cmpxchg(&ctx->state, state, CRX_FREEING) != state)
-			continue;
-		noise_keypair_put(ctx->keypair);
-		peer_put(ctx->peer);
-		dev_kfree_skb(ctx->skb);
-		del_ctx(ctx);
-		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+	while ((ctx = peer_dequeue_ctx(&peer->receive_queue, CTX_ANY)) != NULL) {
+		/* Only drop the ctx here if it is not in the shared queue. */
+		if (atomic_xchg(&ctx->state, CTX_FREEING) == CTX_DECRYPTED)
+			drop_ctx(ctx, false);
 	}
-	rcu_read_unlock_bh();
-
-	rcu_read_lock_bh();
-	list_for_each_entry_rcu(ctx, &peer->device->encryption_queue, list) {
-		if (ctx->peer != peer)
-			continue;
-		state = atomic_read(&ctx->state);
-		/* We can't throw away a ctx that's currently being processed. */
-		if (state == CTX_INITIALIZING || state == CTX_ENCRYPTING || state == CTX_FREEING)
-			continue;
-		/* Claim this ctx so it doesn't start being processed. */
-		if (atomic_cmpxchg(&ctx->state, state, CTX_FREEING) != state)
-			continue;
-		if (state != CTX_ENCRYPTED)
-			noise_keypair_put(ctx->keypair);
-		peer_put(ctx->peer);
-		skb_queue_purge(&ctx->queue);
-		del_ctx(ctx);
-		call_rcu_bh(&ctx->rcu, packet_free_crypt_ctx);
+	while ((ctx = peer_dequeue_ctx(&peer->send_queue, CTX_ANY)) != NULL) {
+		int state = atomic_xchg(&ctx->state, CTX_FREEING);
+		/* Only drop the ctx here if it is not in the shared queue. */
+		if (state == CTX_NEW || state == CTX_ENCRYPTED)
+			drop_ctx(ctx, true);
 	}
-	rcu_read_unlock_bh();
 }

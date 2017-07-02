@@ -29,6 +29,11 @@ struct endpoint {
 	};
 };
 
+struct peer_queue {
+	struct list_head list;
+	spinlock_t lock;
+};
+
 struct wireguard_peer {
 	struct wireguard_device *device;
 	struct endpoint endpoint;
@@ -52,6 +57,7 @@ struct wireguard_peer {
 	struct rcu_head rcu;
 	struct list_head peer_list;
 	u64 internal_id;
+	struct peer_queue send_queue, receive_queue;
 	struct work_struct packet_initialization_work, packet_transmission_work, packet_consumption_work;
 };
 

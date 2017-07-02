@@ -223,8 +223,8 @@ static void destruct(struct net_device *dev)
 	wg->incoming_port = 0;
 	destroy_workqueue(wg->incoming_handshake_wq);
 	destroy_workqueue(wg->peer_wq);
-	free_percpu(wg->decryption_worker);
-	free_percpu(wg->encryption_worker);
+	free_percpu(wg->decrypt_queue);
+	free_percpu(wg->encrypt_queue);
 	destroy_workqueue(wg->crypt_wq);
 	routing_table_free(&wg->peer_routing_table);
 	ratelimiter_uninit();
@@ -311,22 +311,22 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 	if (!wg->crypt_wq)
 		goto error_5;
 
-	INIT_LIST_HEAD(&wg->encryption_queue);
-	wg->encryption_worker = alloc_percpu(struct percpu_worker);
-	if (!wg->encryption_worker)
+	wg->encrypt_queue = alloc_percpu(struct crypt_queue);
+	if (!wg->encrypt_queue)
 		goto error_6;
 	for_each_possible_cpu (cpu) {
-		per_cpu_ptr(wg->encryption_worker, cpu)->wg = wg;
-		INIT_WORK(&per_cpu_ptr(wg->encryption_worker, cpu)->work, packet_encryption_worker);
+		INIT_LIST_HEAD(&per_cpu_ptr(wg->encrypt_queue, cpu)->list);
+		per_cpu_ptr(wg->encrypt_queue, cpu)->wg = wg;
+		INIT_WORK(&per_cpu_ptr(wg->encrypt_queue, cpu)->work, packet_encryption_worker);
 	}
 
-	INIT_LIST_HEAD(&wg->decryption_queue);
-	wg->decryption_worker = alloc_percpu(struct percpu_worker);
-	if (!wg->decryption_worker)
+	wg->decrypt_queue = alloc_percpu(struct crypt_queue);
+	if (!wg->decrypt_queue)
 		goto error_7;
 	for_each_possible_cpu (cpu) {
-		per_cpu_ptr(wg->decryption_worker, cpu)->wg = wg;
-		INIT_WORK(&per_cpu_ptr(wg->decryption_worker, cpu)->work, packet_decryption_worker);
+		INIT_LIST_HEAD(&per_cpu_ptr(wg->decrypt_queue, cpu)->list);
+		per_cpu_ptr(wg->decrypt_queue, cpu)->wg = wg;
+		INIT_WORK(&per_cpu_ptr(wg->decrypt_queue, cpu)->work, packet_decryption_worker);
 	}
 
 	ret = ratelimiter_init();
@@ -349,9 +349,9 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 error_9:
 	ratelimiter_uninit();
 error_8:
-	free_percpu(wg->decryption_worker);
+	free_percpu(wg->decrypt_queue);
 error_7:
-	free_percpu(wg->encryption_worker);
+	free_percpu(wg->encrypt_queue);
 error_6:
 	destroy_workqueue(wg->crypt_wq);
 error_5:

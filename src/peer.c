@@ -45,6 +45,10 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	kref_init(&peer->refcount);
 	pubkey_hashtable_add(&wg->peer_hashtable, peer);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
+	INIT_LIST_HEAD(&peer->send_queue.list);
+	spin_lock_init(&peer->send_queue.lock);
+	INIT_LIST_HEAD(&peer->receive_queue.list);
+	spin_lock_init(&peer->receive_queue.lock);
 	INIT_WORK(&peer->packet_transmission_work, packet_transmission_worker);
 	INIT_WORK(&peer->packet_initialization_work, packet_initialization_worker);
 	INIT_WORK(&peer->packet_consumption_work, packet_consumption_worker);

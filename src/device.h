@@ -20,7 +20,8 @@ struct handshake_worker {
 	struct work_struct work;
 };
 
-struct percpu_worker {
+struct crypt_queue {
+	struct list_head list;
 	struct wireguard_device *wg;
 	struct work_struct work;
 };
@@ -45,9 +46,8 @@ struct wireguard_device {
 	struct mutex device_update_lock;
 	struct mutex socket_update_lock;
 	struct workqueue_struct *crypt_wq;
-	int encryption_cpu, decryption_cpu;
-	struct list_head encryption_queue, decryption_queue;
-	struct percpu_worker __percpu *encryption_worker, *decryption_worker;
+	int encrypt_cpu, decrypt_cpu;
+	struct crypt_queue __percpu *encrypt_queue, *decrypt_queue;
 };
 
 int device_init(void);

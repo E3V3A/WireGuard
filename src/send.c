@@ -4,7 +4,6 @@
 #include "timers.h"
 #include "device.h"
 #include "peer.h"
-#include "queue.h"
 #include "socket.h"
 #include "messages.h"
 #include "cookie.h"
@@ -112,7 +111,7 @@ void packet_send_keepalive(struct wireguard_peer *peer)
 	struct sk_buff *skb;
 	struct sk_buff_head queue;
 
-	if (peer_has_queued_ctx(&peer->device->encryption_queue, peer)) {
+	if (!list_empty(&peer->send_queue.list)) {
 		/* There are packets pending which need to be initialized with the new keypair. */
 		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
 	} else {
