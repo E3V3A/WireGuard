@@ -14,7 +14,7 @@
 #include <net/udp_tunnel.h>
 #include <net/ipv6.h>
 
-static inline int send4(struct wireguard_device *wg, struct sk_buff *skb, struct endpoint *endpoint, u8 ds, struct dst_cache *cache)
+static int send4(struct wireguard_device *wg, struct sk_buff *skb, struct endpoint *endpoint, u8 ds, struct dst_cache *cache)
 {
 	struct flowi4 fl = {
 		.saddr = endpoint->src4.s_addr,
@@ -76,7 +76,7 @@ out:
 	return ret;
 }
 
-static inline int send6(struct wireguard_device *wg, struct sk_buff *skb, struct endpoint *endpoint, u8 ds, struct dst_cache *cache)
+static int send6(struct wireguard_device *wg, struct sk_buff *skb, struct endpoint *endpoint, u8 ds, struct dst_cache *cache)
 {
 #if IS_ENABLED(CONFIG_IPV6)
 	struct flowi6 fl = {
@@ -276,7 +276,7 @@ err:
 	return 0;
 }
 
-static inline void sock_free(struct sock *sock)
+static void sock_free(struct sock *sock)
 {
 	if (unlikely(!sock))
 		return;
@@ -284,7 +284,7 @@ static inline void sock_free(struct sock *sock)
 	udp_tunnel_sock_release(sock->sk_socket);
 }
 
-static inline void set_sock_opts(struct socket *sock)
+static void set_sock_opts(struct socket *sock)
 {
 	sock->sk->sk_allocation = GFP_ATOMIC;
 	sock->sk->sk_sndbuf = INT_MAX;

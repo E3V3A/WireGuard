@@ -54,7 +54,7 @@ void packet_deinit_data_caches(void)
 #endif
 
 /* This is RFC6479, a replay detection bitmap algorithm that avoids bitshifts */
-static inline bool counter_validate(union noise_counter *counter, u64 their_counter)
+static bool counter_validate(union noise_counter *counter, u64 their_counter)
 {
 	bool ret = false;
 	unsigned long index, index_current, top, i;
@@ -87,7 +87,7 @@ out:
 }
 #include "selftest/counter.h"
 
-static inline unsigned int skb_padding(struct sk_buff *skb)
+static unsigned int skb_padding(struct sk_buff *skb)
 {
 	/* We do this modulo business with the MTU, just in case the networking layer
 	 * gives us a packet that's bigger than the MTU. Now that we support GSO, this
@@ -99,7 +99,7 @@ static inline unsigned int skb_padding(struct sk_buff *skb)
 	return padded_size - last_unit;
 }
 
-static inline void skb_reset(struct sk_buff *skb)
+static void skb_reset(struct sk_buff *skb)
 {
 	skb_scrub_packet(skb, false);
 	memset(&skb->headers_start, 0, offsetof(struct sk_buff, headers_end) - offsetof(struct sk_buff, headers_start));
@@ -119,7 +119,7 @@ static inline void skb_reset(struct sk_buff *skb)
 	skb_reset_inner_headers(skb);
 }
 
-static inline bool skb_encrypt(struct sk_buff *skb, struct noise_keypair *keypair, bool have_simd)
+static bool skb_encrypt(struct sk_buff *skb, struct noise_keypair *keypair, bool have_simd)
 {
 	struct scatterlist sg[MAX_SKB_FRAGS * 2 + 1];
 	struct message_data *header;
@@ -165,7 +165,7 @@ static inline bool skb_encrypt(struct sk_buff *skb, struct noise_keypair *keypai
 	return chacha20poly1305_encrypt_sg(sg, sg, plaintext_len, NULL, 0, PACKET_CB(skb)->nonce, keypair->sending.key, have_simd);
 }
 
-static inline bool skb_decrypt(struct sk_buff *skb, struct noise_symmetric_key *key)
+static bool skb_decrypt(struct sk_buff *skb, struct noise_symmetric_key *key)
 {
 	struct scatterlist sg[MAX_SKB_FRAGS * 2 + 1];
 	struct sk_buff *trailer;
@@ -195,7 +195,7 @@ static inline bool skb_decrypt(struct sk_buff *skb, struct noise_symmetric_key *
 	return !pskb_trim(skb, skb->len - noise_encrypted_len(0));
 }
 
-static inline bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *key)
+static bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *key)
 {
 	if (unlikely(!key))
 		return false;
@@ -214,7 +214,7 @@ static inline bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *
 	return true;
 }
 
-static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_keypair *keypair)
+static void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_keypair *keypair)
 {
 	struct sk_buff *skb, *tmp;
 	bool have_simd = chacha20poly1305_init_simd();
@@ -253,7 +253,7 @@ static void finish_parallel_encryption(struct padata_priv *padata)
 	kmem_cache_free(encryption_ctx_cache, ctx);
 }
 
-static inline unsigned int choose_cpu(__le32 key)
+static unsigned int choose_cpu(__le32 key)
 {
 	unsigned int cpu_index, cpu, cb_cpu;
 

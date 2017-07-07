@@ -4,7 +4,7 @@
 #include "peer.h"
 #include "noise.h"
 
-static inline struct hlist_head *pubkey_bucket(struct pubkey_hashtable *table, const u8 pubkey[NOISE_PUBLIC_KEY_LEN])
+static struct hlist_head *pubkey_bucket(struct pubkey_hashtable *table, const u8 pubkey[NOISE_PUBLIC_KEY_LEN])
 {
 	/* siphash gives us a secure 64bit number based on a random key. Since the bits are
 	 * uniformly distributed, we can then mask off to get the bits we need. */
@@ -48,7 +48,7 @@ struct wireguard_peer *pubkey_hashtable_lookup(struct pubkey_hashtable *table, c
 	return peer;
 }
 
-static inline struct hlist_head *index_bucket(struct index_hashtable *table, const __le32 index)
+static struct hlist_head *index_bucket(struct index_hashtable *table, const __le32 index)
 {
 	/* Since the indices are random and thus all bits are uniformly distributed,
 	 * we can find its bucket simply by masking. */

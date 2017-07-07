@@ -89,7 +89,7 @@ void packet_send_handshake_cookie(struct wireguard_device *wg, struct sk_buff *i
 	socket_send_buffer_as_reply_to_skb(wg, initiating_skb, &packet, sizeof(packet));
 }
 
-static inline void keep_key_fresh(struct wireguard_peer *peer)
+static void keep_key_fresh(struct wireguard_peer *peer)
 {
 	struct noise_keypair *keypair;
 	bool send = false;

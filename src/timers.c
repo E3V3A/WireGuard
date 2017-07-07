@@ -14,7 +14,7 @@
  */
 
 /* This rounds the time down to the closest power of two of the closest quarter second. */
-static inline unsigned long slack_time(unsigned long time)
+static unsigned long slack_time(unsigned long time)
 {
 	return time & ~(roundup_pow_of_two(HZ / 4) - 1);
 }

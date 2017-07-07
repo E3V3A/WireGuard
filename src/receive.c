@@ -12,7 +12,7 @@
 #include <linux/udp.h>
 #include <net/ip_tunnels.h>
 
-static inline void rx_stats(struct wireguard_peer *peer, size_t len)
+static void rx_stats(struct wireguard_peer *peer, size_t len)
 {
 	struct pcpu_sw_netstats *tstats = get_cpu_ptr(netdev_pub(peer->device)->tstats);
 	u64_stats_update_begin(&tstats->syncp);
@@ -23,14 +23,14 @@ static inline void rx_stats(struct wireguard_peer *peer, size_t len)
 	peer->rx_bytes += len;
 }
 
-static inline void update_latest_addr(struct wireguard_peer *peer, struct sk_buff *skb)
+static void update_latest_addr(struct wireguard_peer *peer, struct sk_buff *skb)
 {
 	struct endpoint endpoint;
 	if (!socket_endpoint_from_skb(&endpoint, skb))
 		socket_set_peer_endpoint(peer, &endpoint);
 }
 
-static inline int skb_prepare_header(struct sk_buff *skb, struct wireguard_device *wg)
+static int skb_prepare_header(struct sk_buff *skb, struct wireguard_device *wg)
 {
 	struct udphdr *udp;
 	size_t data_offset, data_len;

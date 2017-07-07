@@ -11,7 +11,7 @@ struct routing_table_node {
 	u8 bits[] __aligned(__alignof__(u64));
 };
 
-static inline void copy_and_assign_cidr(struct routing_table_node *node, const u8 *src, u8 cidr)
+static void copy_and_assign_cidr(struct routing_table_node *node, const u8 *src, u8 cidr)
 {
 	memcpy(node->bits, src, (cidr + 7) / 8);
 	node->bits[(cidr + 7) / 8 - 1] &= 0xff << ((8 - (cidr % 8)) % 8);
@@ -119,12 +119,12 @@ static void walk_remove_by_peer(struct routing_table_node __rcu **top, struct wi
 #undef deref
 #undef push
 
-static inline unsigned int fls128(u64 a, u64 b)
+static unsigned int fls128(u64 a, u64 b)
 {
 	return a ? fls64(a) + 64 : fls64(b);
 }
 
-static inline u8 common_bits(const struct routing_table_node *node, const u8 *key, u8 bits)
+static u8 common_bits(const struct routing_table_node *node, const u8 *key, u8 bits)
 {
 	if (bits == 32)
 		return 32 - fls(be32_to_cpu(*(const __be32 *)node->bits ^ *(const __be32 *)key));
@@ -134,7 +134,7 @@ static inline u8 common_bits(const struct routing_table_node *node, const u8 *ke
 	return 0;
 }
 
-static inline struct routing_table_node *find_node(struct routing_table_node *trie, u8 bits, const u8 *key)
+static struct routing_table_node *find_node(struct routing_table_node *trie, u8 bits, const u8 *key)
 {
 	struct routing_table_node *node = trie, *found = NULL;
 
@@ -149,7 +149,7 @@ static inline struct routing_table_node *find_node(struct routing_table_node *tr
 }
 
 /* Returns a strong reference to a peer */
-static inline struct wireguard_peer *lookup(struct routing_table_node __rcu *root, u8 bits, const void *ip)
+static struct wireguard_peer *lookup(struct routing_table_node __rcu *root, u8 bits, const void *ip)
 {
 	struct wireguard_peer *peer = NULL;
 	struct routing_table_node *node;
@@ -162,7 +162,7 @@ static inline struct wireguard_peer *lookup(struct routing_table_node __rcu *roo
 	return peer;
 }
 
-static inline bool node_placement(struct routing_table_node __rcu *trie, const u8 *key, u8 cidr, u8 bits, struct routing_table_node **rnode, struct mutex *lock)
+static bool node_placement(struct routing_table_node __rcu *trie, const u8 *key, u8 cidr, u8 bits, struct routing_table_node **rnode, struct mutex *lock)
 {
 	bool exact = false;
 	struct routing_table_node *parent = NULL, *node = rcu_dereference_protected(trie, lockdep_is_held(lock));

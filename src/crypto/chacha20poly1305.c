@@ -62,32 +62,32 @@ void __init chacha20poly1305_fpu_init(void) { }
 #define POLY1305_KEY_SIZE	32
 #define POLY1305_MAC_SIZE	16
 
-static inline u32 le32_to_cpuvp(const void *p)
+static u32 le32_to_cpuvp(const void *p)
 {
 	return le32_to_cpup(p);
 }
 
-static inline u64 le64_to_cpuvp(const void *p)
+static u64 le64_to_cpuvp(const void *p)
 {
 	return le64_to_cpup(p);
 }
 
-static inline u32 rotl32(u32 v, u8 n)
+static u32 rotl32(u32 v, u8 n)
 {
 	return (v << n) | (v >> (sizeof(v) * 8 - n));
 }
 
-static inline u64 mlt(u64 a, u64 b)
+static u64 mlt(u64 a, u64 b)
 {
 	return a * b;
 }
 
-static inline u32 sr(u64 v, u_char n)
+static u32 sr(u64 v, u_char n)
 {
 	return v >> n;
 }
 
-static inline u32 and(u32 v, u32 mask)
+static u32 and(u32 v, u32 mask)
 {
 	return v & mask;
 }
@@ -230,7 +230,7 @@ static void hchacha20_generic(u8 derived_key[CHACHA20POLY1305_KEYLEN], const u8 
 	out[7] = cpu_to_le32(x[15]);
 }
 
-static inline void hchacha20(u8 derived_key[CHACHA20POLY1305_KEYLEN], const u8 nonce[16], const u8 key[CHACHA20POLY1305_KEYLEN], bool have_simd)
+static void hchacha20(u8 derived_key[CHACHA20POLY1305_KEYLEN], const u8 nonce[16], const u8 key[CHACHA20POLY1305_KEYLEN], bool have_simd)
 {
 	if (!have_simd)
 		goto no_simd;
@@ -621,7 +621,7 @@ static struct blkcipher_desc chacha20_desc = {
 	.tfm = &chacha20_cipher
 };
 
-static inline void __chacha20poly1305_encrypt(u8 *dst, const u8 *src, const size_t src_len,
+static void __chacha20poly1305_encrypt(u8 *dst, const u8 *src, const size_t src_len,
 					      const u8 *ad, const size_t ad_len,
 					      const u64 nonce, const u8 key[CHACHA20POLY1305_KEYLEN],
 					      bool have_simd)
@@ -726,7 +726,7 @@ err:
 	return !ret;
 }
 
-static inline bool __chacha20poly1305_decrypt(u8 *dst, const u8 *src, const size_t src_len,
+static bool __chacha20poly1305_decrypt(u8 *dst, const u8 *src, const size_t src_len,
 					      const u8 *ad, const size_t ad_len,
 					      const u64 nonce, const u8 key[CHACHA20POLY1305_KEYLEN],
 					      bool have_simd)

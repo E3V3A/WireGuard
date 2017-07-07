@@ -206,7 +206,7 @@ struct data_remaining {
 	size_t count;
 };
 
-static inline int use_data(struct data_remaining *data, size_t size)
+static int use_data(struct data_remaining *data, size_t size)
 {
 	if (data->out_len < size)
 		return -EMSGSIZE;
