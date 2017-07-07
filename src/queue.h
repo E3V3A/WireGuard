@@ -52,8 +52,18 @@ static inline struct list_head *list_dequeue_atomic(struct list_head *queue)
 	return first;
 }
 
+static inline struct list_head *list_dequeue_atomic_dec(struct crypt_queue *queue)
+{
+	return atomic_add_unless(&queue->qlen, -1, 0) ? list_dequeue_atomic(&queue->list) : NULL;
+}
+
 #define list_dequeue_entry_atomic(ptr, type, member) ({ \
 	struct list_head *__head = list_dequeue_atomic(ptr); \
+	__head ? list_entry(__head, type, member) : NULL; \
+})
+
+#define list_dequeue_entry_atomic_dec(ptr, type, member) ({ \
+	struct list_head *__head = list_dequeue_atomic_dec(ptr); \
 	__head ? list_entry(__head, type, member) : NULL; \
 })
 
@@ -75,6 +85,13 @@ static inline void list_enqueue_atomic(struct list_head *queue,
 		WRITE_ONCE(item->prev, last);
 	} while (cmpxchg(&queue->prev, last, item) != last);
 	WRITE_ONCE(last->next, item);
+}
+
+static inline void list_enqueue_atomic_inc(struct crypt_queue *queue,
+					   struct list_head *item)
+{
+	list_enqueue_atomic(&queue->list, item);
+	atomic_inc(&queue->qlen);
 }
 
 #endif /* WGQUEUE_H */

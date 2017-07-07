@@ -59,7 +59,7 @@ static inline int next_cpu(int *next)
 #define queue_ctx_and_work_on_next_cpu(ctx, wq, queue, cpu) ({ \
 	int __cpu = next_cpu(cpu); \
 	struct crypt_queue *__queue = per_cpu_ptr(queue, __cpu); \
-	list_enqueue_atomic(&__queue->list, &(ctx)->shared_list); \
+	list_enqueue_atomic_inc(__queue, &(ctx)->shared_list); \
 	queue_work_on(__cpu, wq, &__queue->work); \
 })
 
@@ -260,7 +260,7 @@ void packet_encryption_worker(struct work_struct *work)
 	struct wireguard_peer *peer;
 
 	have_simd = chacha20poly1305_init_simd();
-	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
+	while ((ctx = list_dequeue_entry_atomic_dec(queue, struct crypt_ctx, shared_list)) != NULL) {
 		skb_queue_walk_safe (&ctx->queue, skb, tmp) {
 			if (unlikely(!skb_encrypt(skb, ctx->keypair, have_simd))) {
 				__skb_unlink(skb, &ctx->queue);
@@ -374,7 +374,7 @@ void packet_decryption_worker(struct work_struct *work)
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
 	struct wireguard_peer *peer;
 
-	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
+	while ((ctx = list_dequeue_entry_atomic_dec(queue, struct crypt_ctx, shared_list)) != NULL) {
 		if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
 			dev_kfree_skb(ctx->skb);
 			ctx->skb = NULL;
