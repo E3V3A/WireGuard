@@ -234,7 +234,7 @@ void packet_consume_data_done(struct sk_buff *skb, struct wireguard_peer *peer, 
 		goto dishonest_packet_peer;
 
 	len = skb->len;
-	if (likely(netif_rx(skb) == NET_RX_SUCCESS))
+	if (likely(netif_rx_ni(skb) == NET_RX_SUCCESS))
 		rx_stats(peer, len);
 	else {
 		++dev->stats.rx_dropped;
