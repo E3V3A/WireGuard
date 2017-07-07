@@ -205,45 +205,35 @@ static inline bool skb_decrypt(struct sk_buff *skb, struct noise_symmetric_key *
 	return !pskb_trim(skb, skb->len - noise_encrypted_len(0));
 }
 
-static inline bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *key)
+static inline bool queue_add_keypair_and_nonces(struct crypt_ctx *ctx)
 {
-	if (unlikely(!key))
-		return false;
-
-	if (unlikely(!key->is_valid || time_is_before_eq_jiffies64(key->birthdate + REJECT_AFTER_TIME))) {
-		key->is_valid = false;
-		return false;
-	}
-
-	*nonce = atomic64_inc_return(&key->counter.counter) - 1;
-	if (*nonce >= REJECT_AFTER_MESSAGES) {
-		key->is_valid = false;
-		return false;
-	}
-
-	return true;
-}
-
-static inline bool queue_add_keypair_and_nonces(struct sk_buff_head *queue, struct wireguard_peer *peer, struct noise_keypair **keypair_out)
-{
-	struct noise_keypair *keypair;
+	struct noise_symmetric_key *key;
 	struct sk_buff *skb;
 
 	rcu_read_lock_bh();
-	keypair = noise_keypair_get(rcu_dereference_bh(peer->keypairs.current_keypair));
+	ctx->keypair = noise_keypair_get(rcu_dereference_bh(ctx->peer->keypairs.current_keypair));
 	rcu_read_unlock_bh();
-	if (unlikely(!keypair))
+	if (unlikely(!ctx->keypair))
 		return false;
+	key = &ctx->keypair->sending;
+	if (unlikely(!key || !key->is_valid))
+		goto out_nokey;
+	if (unlikely(time_is_before_eq_jiffies64(key->birthdate + REJECT_AFTER_TIME)))
+		goto out_invalid;
 
-	skb_queue_walk(queue, skb) {
-		if (unlikely(!get_encryption_nonce(&PACKET_CB(skb)->nonce, &keypair->sending))) {
-			noise_keypair_put(keypair);
-			return false;
-		}
+	skb_queue_walk(&ctx->queue, skb) {
+		PACKET_CB(skb)->nonce = atomic64_inc_return(&key->counter.counter) - 1;
+		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))
+			goto out_invalid;
 	}
 
-	*keypair_out = keypair;
 	return true;
+
+out_invalid:
+	key->is_valid = false;
+out_nokey:
+	noise_keypair_put(ctx->keypair);
+	return false;
 }
 
 static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_keypair *keypair)
@@ -312,7 +302,7 @@ void packet_initialization_worker(struct work_struct *work)
 	}
 
 	while ((ctx = list_first_entry_or_null(&peer->init_queue, struct crypt_ctx, peer_list)) != NULL) {
-		if (likely(queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair))) {
+		if (likely(queue_add_keypair_and_nonces(ctx))) {
 			list_dequeue_atomic(&peer->init_queue);
 			list_enqueue_atomic(&peer->send_queue, &ctx->peer_list);
 			queue_ctx_and_work_on_next_cpu(ctx, peer->device->crypt_wq, peer->device->encrypt_queue, &peer->device->encrypt_cpu);
@@ -345,7 +335,7 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 		/* Handle a possible race with packet_initialization_worker(). */
 		if (list_first_entry_or_null(&peer->init_queue, struct crypt_ctx, peer_list) == ctx)
 			queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
-	} else if (unlikely(!queue_add_keypair_and_nonces(&ctx->queue, ctx->peer, &ctx->keypair))) {
+	} else if (unlikely(!queue_add_keypair_and_nonces(ctx))) {
 		skb_queue_walk (&ctx->queue, skb)
 			skb_orphan(skb);
 		list_enqueue_atomic(&peer->init_queue, &ctx->peer_list);
