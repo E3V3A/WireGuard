@@ -43,19 +43,6 @@ static void drop_ctx(struct crypt_ctx *ctx, bool sending)
 	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 
-static inline unsigned int choose_cpu(__le32 key)
-{
-	unsigned int cpu_index, cpu, cb_cpu;
-
-	/* This ensures that packets encrypted to the same key are sent in-order. */
-	cpu_index = ((__force unsigned int)key) % cpumask_weight(cpu_online_mask);
-	cb_cpu = cpumask_first(cpu_online_mask);
-	for (cpu = 0; cpu < cpu_index; ++cpu)
-		cb_cpu = cpumask_next(cb_cpu, cpu_online_mask);
-
-	return cb_cpu;
-}
-
 static inline int next_cpu(int *next)
 {
 	int cpu = *next;
@@ -292,13 +279,11 @@ void packet_transmission_worker(struct work_struct *work)
 
 void packet_encryption_worker(struct work_struct *work)
 {
-	int cpu;
 	struct crypt_ctx *ctx;
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
 	struct wireguard_peer *peer;
 
 	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
-		cpu = choose_cpu(ctx->keypair->remote_index);
 		/* TODO: inline. */
 		queue_encrypt_reset(&ctx->queue, ctx->keypair);
 		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
@@ -307,7 +292,7 @@ void packet_encryption_worker(struct work_struct *work)
 			drop_ctx(ctx, true);
 			continue;
 		}
-		queue_work_on(cpu, peer->device->crypt_wq, &peer->packet_transmission_work);
+		queue_work_on(peer->work_cpu, peer->device->crypt_wq, &peer->packet_transmission_work);
 		peer_put(peer);
 	}
 }
@@ -421,13 +406,11 @@ void packet_consumption_worker(struct work_struct *work)
 
 void packet_decryption_worker(struct work_struct *work)
 {
-	int cpu;
 	struct crypt_ctx *ctx;
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
 	struct wireguard_peer *peer;
 
 	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
-		cpu = choose_cpu(((struct message_data *)ctx->skb->data)->key_idx);
 		peer = peer_rcu_get(ctx->peer);
 		begin_decrypt_packet(ctx);
 		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
@@ -435,7 +418,7 @@ void packet_decryption_worker(struct work_struct *work)
 			drop_ctx(ctx, false);
 			continue;
 		}
-		queue_work_on(cpu, peer->device->crypt_wq, &peer->packet_consumption_work);
+		queue_work_on(peer->work_cpu, peer->device->crypt_wq, &peer->packet_consumption_work);
 		peer_put(peer);
 	}
 }

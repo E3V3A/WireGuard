@@ -53,6 +53,7 @@ struct wireguard_peer {
 	struct rcu_head rcu;
 	struct list_head peer_list;
 	u64 internal_id;
+	int work_cpu;
 	struct list_head init_queue, send_queue, receive_queue;
 	struct work_struct packet_initialization_work, packet_transmission_work, packet_consumption_work;
 };

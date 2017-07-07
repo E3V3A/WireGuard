@@ -14,6 +14,18 @@
 
 static atomic64_t peer_counter = ATOMIC64_INIT(0);
 
+static int choose_cpu(u64 id)
+{
+	unsigned int cpu, cpu_index, i;
+
+	cpu_index = id % cpumask_weight(cpu_online_mask);
+	cpu = cpumask_first(cpu_online_mask);
+	for (i = 0; i < cpu_index; i += 1)
+		cpu = cpumask_next(cpu, cpu_online_mask);
+
+	return cpu;
+}
+
 struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_key[NOISE_PUBLIC_KEY_LEN], const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN])
 {
 	struct wireguard_peer *peer;
@@ -45,6 +57,7 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	kref_init(&peer->refcount);
 	pubkey_hashtable_add(&wg->peer_hashtable, peer);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
+	peer->work_cpu = choose_cpu(peer->internal_id);
 	INIT_LIST_HEAD(&peer->init_queue);
 	INIT_LIST_HEAD(&peer->send_queue);
 	INIT_LIST_HEAD(&peer->receive_queue);
