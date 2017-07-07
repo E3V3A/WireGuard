@@ -236,22 +236,6 @@ out_nokey:
 	return false;
 }
 
-static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_keypair *keypair)
-{
-	struct sk_buff *skb, *tmp;
-	bool have_simd = chacha20poly1305_init_simd();
-	skb_queue_walk_safe (queue, skb, tmp) {
-		if (unlikely(!skb_encrypt(skb, keypair, have_simd))) {
-			__skb_unlink(skb, queue);
-			kfree_skb(skb);
-			continue;
-		}
-		skb_reset(skb);
-	}
-	chacha20poly1305_deinit_simd(have_simd);
-	noise_keypair_put(keypair);
-}
-
 void packet_transmission_worker(struct work_struct *work)
 {
 	struct crypt_ctx *ctx;
@@ -269,13 +253,23 @@ void packet_transmission_worker(struct work_struct *work)
 
 void packet_encryption_worker(struct work_struct *work)
 {
+	bool have_simd;
 	struct crypt_ctx *ctx;
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
+	struct sk_buff *skb, *tmp;
 	struct wireguard_peer *peer;
 
+	have_simd = chacha20poly1305_init_simd();
 	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
-		/* TODO: inline. */
-		queue_encrypt_reset(&ctx->queue, ctx->keypair);
+		skb_queue_walk_safe (&ctx->queue, skb, tmp) {
+			if (unlikely(!skb_encrypt(skb, ctx->keypair, have_simd))) {
+				__skb_unlink(skb, &ctx->queue);
+				kfree_skb(skb);
+				continue;
+			}
+			skb_reset(skb);
+		}
+		noise_keypair_put(ctx->keypair);
 		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
 		peer = peer_rcu_get(ctx->peer);
 		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_FINISHED) == CTX_FREEING)) {
@@ -285,6 +279,7 @@ void packet_encryption_worker(struct work_struct *work)
 		queue_work_on(peer->work_cpu, peer->device->crypt_wq, &peer->packet_transmission_work);
 		peer_put(peer);
 	}
+	chacha20poly1305_deinit_simd(have_simd);
 }
 
 void packet_initialization_worker(struct work_struct *work)
