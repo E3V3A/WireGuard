@@ -262,7 +262,6 @@ packet_processed:
 continue_processing:
 	timers_any_authenticated_packet_received(peer);
 	timers_any_authenticated_packet_traversal(peer);
-	peer_put(peer);
 }
 
 void packet_receive(struct wireguard_device *wg, struct sk_buff *skb)

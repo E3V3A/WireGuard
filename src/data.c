@@ -415,38 +415,29 @@ void packet_decryption_worker(struct work_struct *work)
 
 void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 {
+	struct crypt_ctx *ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
 	struct noise_keypair *keypair;
 	__le32 idx = ((struct message_data *)skb->data)->key_idx;
 
+	if (unlikely(!ctx)) {
+		dev_kfree_skb(skb);
+		return;
+	}
 	rcu_read_lock_bh();
 	keypair = noise_keypair_get((struct noise_keypair *)index_hashtable_lookup(&wg->index_hashtable, INDEX_HASHTABLE_KEYPAIR, idx));
 	rcu_read_unlock_bh();
 	if (unlikely(!keypair)) {
 		dev_kfree_skb(skb);
+		kmem_cache_free(crypt_ctx_cache, ctx);
 		return;
 	}
 
-	if (cpumask_weight(cpu_online_mask) > 1) {
-		struct crypt_ctx *ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
-		if (unlikely(!ctx))
-			goto serial;
-		ctx->peer = peer_rcu_get(keypair->entry.peer);
-		ctx->skb = skb;
-		ctx->keypair = keypair;
-		atomic_set(&ctx->state, CTX_NEW);
-		list_enqueue_atomic(&ctx->peer->receive_queue, &ctx->peer_list);
-		queue_ctx_and_work_on_next_cpu(ctx, wg->crypt_wq, wg->decrypt_queue, &wg->decrypt_cpu);
-	} else
-serial:
-	{
-		struct crypt_ctx ctx = {
-			.peer = keypair->entry.peer,
-			.skb = skb,
-			.keypair = keypair
-		};
-		begin_decrypt_packet(&ctx);
-		finish_decrypt_packet(&ctx);
-	}
+	ctx->skb = skb;
+	ctx->peer = keypair->entry.peer;
+	ctx->keypair = keypair;
+	atomic_set(&ctx->state, CTX_NEW);
+	list_enqueue_atomic(&ctx->peer->receive_queue, &ctx->peer_list);
+	queue_ctx_and_work_on_next_cpu(ctx, wg->crypt_wq, wg->decrypt_queue, &wg->decrypt_cpu);
 }
 
 /* This function cannot run concurrently with any of the work functions. */
