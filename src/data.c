@@ -16,39 +16,19 @@
 #include <net/xfrm.h>
 #include <crypto/algapi.h>
 
-struct decryption_ctx {
-	struct padata_priv padata;
-	struct endpoint endpoint;
-	struct sk_buff *skb;
-	struct noise_keypair *keypair;
-};
-
 static struct kmem_cache *crypt_ctx_cache __read_mostly;
-#ifdef CONFIG_WIREGUARD_PARALLEL
-static struct kmem_cache *decryption_ctx_cache __read_mostly;
-#endif
 
 int __init packet_init_data_caches(void)
 {
 	crypt_ctx_cache = KMEM_CACHE(crypt_ctx, 0);
 	if (!crypt_ctx_cache)
 		return -ENOMEM;
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	decryption_ctx_cache = KMEM_CACHE(decryption_ctx, 0);
-	if (!decryption_ctx_cache) {
-		kmem_cache_destroy(crypt_ctx_cache);
-		return -ENOMEM;
-	}
-#endif
 	return 0;
 }
 
 void packet_deinit_data_caches(void)
 {
 	kmem_cache_destroy(crypt_ctx_cache);
-#ifdef CONFIG_WIREGUARD_PARALLEL
-	kmem_cache_destroy(decryption_ctx_cache);
-#endif
 }
 
 void packet_free_crypt_ctx(struct rcu_head *head)
@@ -358,7 +338,7 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 	return 0;
 }
 
-static void begin_decrypt_packet(struct decryption_ctx *ctx)
+static void begin_decrypt_packet(struct crypt_ctx *ctx)
 {
 	if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
 		peer_put(ctx->keypair->entry.peer);
@@ -368,7 +348,7 @@ static void begin_decrypt_packet(struct decryption_ctx *ctx)
 	}
 }
 
-static void finish_decrypt_packet(struct decryption_ctx *ctx)
+static void finish_decrypt_packet(struct crypt_ctx *ctx)
 {
 	bool used_new_key;
 
@@ -392,7 +372,7 @@ static void finish_decrypt_packet(struct decryption_ctx *ctx)
 #ifdef CONFIG_WIREGUARD_PARALLEL
 static void begin_parallel_decryption(struct padata_priv *padata)
 {
-	struct decryption_ctx *ctx = container_of(padata, struct decryption_ctx, padata);
+	struct crypt_ctx *ctx = container_of(padata, struct crypt_ctx, padata);
 #if IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && defined(CONFIG_ARM)
 	local_bh_enable();
 #endif
@@ -405,9 +385,9 @@ static void begin_parallel_decryption(struct padata_priv *padata)
 
 static void finish_parallel_decryption(struct padata_priv *padata)
 {
-	struct decryption_ctx *ctx = container_of(padata, struct decryption_ctx, padata);
+	struct crypt_ctx *ctx = container_of(padata, struct crypt_ctx, padata);
 	finish_decrypt_packet(ctx);
-	kmem_cache_free(decryption_ctx_cache, ctx);
+	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 #endif
 
@@ -424,7 +404,7 @@ void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 
 #ifdef CONFIG_WIREGUARD_PARALLEL
 	if (cpumask_weight(cpu_online_mask) > 1) {
-		struct decryption_ctx *ctx = kmem_cache_alloc(decryption_ctx_cache, GFP_ATOMIC);
+		struct crypt_ctx *ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
 		if (unlikely(!ctx))
 			goto err_peer;
 		ctx->skb = skb;
@@ -433,13 +413,13 @@ void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
 		ctx->padata.parallel = begin_parallel_decryption;
 		ctx->padata.serial = finish_parallel_decryption;
 		if (unlikely(padata_do_parallel(wg->decrypt_pd, &ctx->padata, choose_cpu(idx)))) {
-			kmem_cache_free(decryption_ctx_cache, ctx);
+			kmem_cache_free(crypt_ctx_cache, ctx);
 			goto err_peer;
 		}
 	} else
 #endif
 	{
-		struct decryption_ctx ctx = {
+		struct crypt_ctx ctx = {
 			.skb = skb,
 			.keypair = keypair
 		};

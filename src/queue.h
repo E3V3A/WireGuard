@@ -31,7 +31,14 @@ struct crypt_ctx {
 	struct list_head list;
 	struct wireguard_peer *peer;
 	struct noise_keypair *keypair;
-	struct sk_buff_head queue;
+	union {
+		struct sk_buff_head queue;
+		struct {
+			struct padata_priv padata;
+			struct sk_buff *skb;
+			struct endpoint endpoint;
+		};
+	};
 	struct rcu_head rcu;
 	atomic_t state;
 };
