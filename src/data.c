@@ -348,47 +348,26 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer)
 	return 0;
 }
 
-static void begin_decrypt_packet(struct crypt_ctx *ctx)
-{
-	if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
-		peer_put(ctx->peer);
-		noise_keypair_put(ctx->keypair);
-		dev_kfree_skb(ctx->skb);
-		ctx->skb = NULL;
-	}
-}
-
-static void finish_decrypt_packet(struct crypt_ctx *ctx)
-{
-	bool used_new_key;
-
-	if (!ctx->skb)
-		return;
-
-	if (unlikely(!counter_validate(&ctx->keypair->receiving.counter, PACKET_CB(ctx->skb)->nonce))) {
-		net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->peer->device->dev->name, PACKET_CB(ctx->skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
-		peer_put(ctx->peer);
-		noise_keypair_put(ctx->keypair);
-		dev_kfree_skb(ctx->skb);
-		return;
-	}
-
-	used_new_key = noise_received_with_keypair(&ctx->peer->keypairs, ctx->keypair);
-	skb_reset(ctx->skb);
-	packet_consume_data_done(ctx->skb, ctx->peer, &ctx->endpoint, used_new_key);
-	noise_keypair_put(ctx->keypair);
-}
-
 void packet_consumption_worker(struct work_struct *work)
 {
 	struct crypt_ctx *ctx;
+	struct sk_buff *skb;
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_consumption_work);
 
 	while ((ctx = list_first_entry_or_null(&peer->receive_queue, struct crypt_ctx, peer_list)) != NULL) {
 		if (atomic_read(&ctx->state) != CTX_FINISHED)
 			break;
 		list_dequeue_atomic(&peer->receive_queue);
-		finish_decrypt_packet(ctx);
+		if (likely(skb = ctx->skb)) {
+			if (unlikely(!counter_validate(&ctx->keypair->receiving.counter, PACKET_CB(skb)->nonce))) {
+				net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->peer->device->dev->name, PACKET_CB(ctx->skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
+				dev_kfree_skb(skb);
+			} else {
+				skb_reset(skb);
+				packet_consume_data_done(skb, ctx->peer, &ctx->endpoint, noise_received_with_keypair(&ctx->peer->keypairs, ctx->keypair));
+			}
+		}
+		noise_keypair_put(ctx->keypair);
 		peer_put(ctx->peer);
 		kmem_cache_free(crypt_ctx_cache, ctx);
 	}
@@ -401,14 +380,16 @@ void packet_decryption_worker(struct work_struct *work)
 	struct wireguard_peer *peer;
 
 	while ((ctx = list_dequeue_entry_atomic(&queue->list, struct crypt_ctx, shared_list)) != NULL) {
-		peer = peer_rcu_get(ctx->peer);
-		begin_decrypt_packet(ctx);
-		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
-		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_FINISHED) == CTX_FREEING)) {
-			drop_ctx(ctx, false);
-			continue;
+		if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
+			dev_kfree_skb(ctx->skb);
+			ctx->skb = NULL;
 		}
-		queue_work_on(peer->work_cpu, peer->device->crypt_wq, &peer->packet_consumption_work);
+		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
+		peer = peer_rcu_get(ctx->peer);
+		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_FINISHED) == CTX_FREEING))
+			drop_ctx(ctx, false);
+		else
+			queue_work_on(peer->work_cpu, peer->device->crypt_wq, &peer->packet_consumption_work);
 		peer_put(peer);
 	}
 }
