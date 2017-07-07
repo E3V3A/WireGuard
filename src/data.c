@@ -281,7 +281,7 @@ void packet_transmission_worker(struct work_struct *work)
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_transmission_work);
 
 	while ((ctx = list_first_entry_or_null(&peer->send_queue, struct crypt_ctx, peer_list)) != NULL) {
-		if (atomic_read(&ctx->state) != CTX_ENCRYPTED)
+		if (atomic_read(&ctx->state) != CTX_FINISHED)
 			break;
 		list_dequeue_atomic(&peer->send_queue);
 		packet_create_data_done(&ctx->queue, ctx->peer);
@@ -301,9 +301,9 @@ void packet_encryption_worker(struct work_struct *work)
 		cpu = choose_cpu(ctx->keypair->remote_index);
 		/* TODO: inline. */
 		queue_encrypt_reset(&ctx->queue, ctx->keypair);
-		/* Dereferencing ctx is unsafe after ctx->state == CTX_ENCRYPTED. */
+		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
 		peer = peer_rcu_get(ctx->peer);
-		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_ENCRYPTED) == CTX_FREEING)) {
+		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_FINISHED) == CTX_FREEING)) {
 			drop_ctx(ctx, true);
 			continue;
 		}
@@ -410,7 +410,7 @@ void packet_consumption_worker(struct work_struct *work)
 	struct wireguard_peer *peer = container_of(work, struct wireguard_peer, packet_consumption_work);
 
 	while ((ctx = list_first_entry_or_null(&peer->receive_queue, struct crypt_ctx, peer_list)) != NULL) {
-		if (atomic_read(&ctx->state) != CTX_DECRYPTED)
+		if (atomic_read(&ctx->state) != CTX_FINISHED)
 			break;
 		list_dequeue_atomic(&peer->receive_queue);
 		finish_decrypt_packet(ctx);
@@ -430,8 +430,8 @@ void packet_decryption_worker(struct work_struct *work)
 		cpu = choose_cpu(((struct message_data *)ctx->skb->data)->key_idx);
 		peer = peer_rcu_get(ctx->peer);
 		begin_decrypt_packet(ctx);
-		/* Dereferencing ctx is unsafe after ctx->state == CTX_DECRYPTED. */
-		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_DECRYPTED) == CTX_FREEING)) {
+		/* Dereferencing ctx is unsafe after ctx->state == CTX_FINISHED. */
+		if (unlikely(atomic_cmpxchg(&ctx->state, CTX_NEW, CTX_FINISHED) == CTX_FREEING)) {
 			drop_ctx(ctx, false);
 			continue;
 		}
@@ -488,7 +488,7 @@ void peer_purge_queues(struct wireguard_peer *peer)
 	need_cleanup_work = false;
 	while ((ctx = list_dequeue_entry_atomic(&peer->send_queue, struct crypt_ctx, peer_list)) != NULL) {
 		/* Only drop the ctx here if it is not in the shared queue. */
-		if (atomic_xchg(&ctx->state, CTX_FREEING) == CTX_ENCRYPTED)
+		if (atomic_xchg(&ctx->state, CTX_FREEING) == CTX_FINISHED)
 			drop_ctx(ctx, true);
 		else
 			need_cleanup_work = true;
@@ -499,7 +499,7 @@ void peer_purge_queues(struct wireguard_peer *peer)
 	need_cleanup_work = false;
 	while ((ctx = list_dequeue_entry_atomic(&peer->receive_queue, struct crypt_ctx, peer_list)) != NULL) {
 		/* Only drop the ctx here if it is not in the shared queue. */
-		if (atomic_xchg(&ctx->state, CTX_FREEING) == CTX_DECRYPTED)
+		if (atomic_xchg(&ctx->state, CTX_FREEING) == CTX_FINISHED)
 			drop_ctx(ctx, false);
 		else
 			need_cleanup_work = true;
