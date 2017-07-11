@@ -20,10 +20,7 @@ enum {
 struct crypt_ctx {
 	struct list_head peer_list;
 	struct list_head shared_list;
-	union {
-		struct sk_buff_head packets;
-		struct sk_buff *skb;
-	};
+	struct sk_buff_head packets;
 	struct wireguard_peer *peer;
 	struct noise_keypair *keypair;
 	struct endpoint endpoint;

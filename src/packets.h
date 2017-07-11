@@ -28,7 +28,7 @@ void packet_process_queued_handshake_packets(struct work_struct *work);
 void packet_consume_data_done(struct sk_buff *skb, struct wireguard_peer *peer, struct endpoint *endpoint, bool used_new_key);
 void packet_receive_worker(struct work_struct *work);
 void packet_decrypt_worker(struct work_struct *work);
-void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg);
+void packet_consume_data(struct wireguard_device *wg, struct sk_buff_head *packets);
 
 /* send.c */
 void keep_key_fresh_send(struct wireguard_peer *peer);

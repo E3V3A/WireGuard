@@ -32,25 +32,22 @@ void deinit_crypt_cache(void)
 	kmem_cache_destroy(crypt_ctx_cache);
 }
 
-static void drop_ctx(struct crypt_ctx *ctx, bool sending)
+static void drop_ctx(struct crypt_ctx *ctx)
 {
 	if (ctx->keypair)
 		noise_keypair_put(ctx->keypair);
 	peer_put(ctx->peer);
-	if (sending)
-		skb_queue_purge(&ctx->packets);
-	else
-		dev_kfree_skb(ctx->skb);
+	skb_queue_purge(&ctx->packets);
 	kmem_cache_free(crypt_ctx_cache, ctx);
 }
 
-#define drop_ctx_and_continue(ctx, sending) ({ \
-	drop_ctx(ctx, sending); \
+#define drop_ctx_and_continue(ctx) ({ \
+	drop_ctx(ctx); \
 	continue; \
 })
 
-#define drop_ctx_and_return(ctx, sending) ({ \
-	drop_ctx(ctx, sending); \
+#define drop_ctx_and_return(ctx) ({ \
+	drop_ctx(ctx); \
 	return; \
 })
 
@@ -293,7 +290,7 @@ void packet_init_worker(struct work_struct *work)
 		}
 		queue_dequeue(queue);
 		if (unlikely(!queue_enqueue_peer(&peer->send_queue, ctx)))
-			drop_ctx_and_continue(ctx, true);
+			drop_ctx_and_continue(ctx);
 		queue_enqueue_shared(peer->device->encrypt_queue, ctx, peer->device->crypt_wq, &peer->device->encrypt_cpu);
 	}
 	spin_unlock(&peer->init_queue_lock);
@@ -323,7 +320,7 @@ void packet_create_data(struct wireguard_peer *peer, struct sk_buff_head *packet
 	if (likely(queue_empty(&peer->init_queue))) {
 		if (likely(packet_initialize_ctx(ctx))) {
 			if (unlikely(!queue_enqueue_peer(&peer->send_queue, ctx)))
-				drop_ctx_and_return(ctx, true);
+				drop_ctx_and_return(ctx);
 			queue_enqueue_shared(wg->encrypt_queue, ctx, wg->crypt_wq, &wg->encrypt_cpu);
 			return;
 		}
@@ -338,13 +335,13 @@ void packet_create_data(struct wireguard_peer *peer, struct sk_buff_head *packet
 	if (unlikely(queue_full(&peer->init_queue)) && spin_trylock(&peer->init_queue_lock)) {
 		struct crypt_ctx *tmp = queue_dequeue_peer(&peer->init_queue);
 		if (likely(tmp))
-			drop_ctx(tmp, true);
+			drop_ctx(tmp);
 		spin_unlock(&peer->init_queue_lock);
 	}
 	skb_queue_walk(&ctx->packets, skb)
 		skb_orphan(skb);
 	if (unlikely(!queue_enqueue_peer(&peer->init_queue, ctx)))
-		drop_ctx_and_return(ctx, true);
+		drop_ctx_and_return(ctx);
 	if (need_handshake)
 		packet_queue_handshake_initiation(peer, false);
 	/* If we have a valid keypair, but took the slow path because init_queue
@@ -356,17 +353,22 @@ void packet_create_data(struct wireguard_peer *peer, struct sk_buff_head *packet
 		queue_work(peer->device->crypt_wq, &peer->init_queue.work);
 }
 
+#define skb_queue_first(list) ({ \
+	struct sk_buff_head *__list = (list); \
+	skb_queue_next(__list, (struct sk_buff *) __list); \
+})
+
 void packet_receive_worker(struct work_struct *work)
 {
 	struct crypt_ctx *ctx;
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
-	struct sk_buff *skb;
+	struct sk_buff *skb, *tmp;
 
 	while ((ctx = queue_first_peer(queue)) != NULL && atomic_read(&ctx->state) == CTX_FINISHED) {
 		queue_dequeue(queue);
-		if (likely(skb = ctx->skb)) {
+		skb_queue_walk_safe(&ctx->packets, skb, tmp) {
 			if (unlikely(!counter_validate(&ctx->keypair->receiving.counter, PACKET_CB(skb)->nonce))) {
-				net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->peer->device->dev->name, PACKET_CB(ctx->skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
+				net_dbg_ratelimited("%s: Packet has invalid nonce %Lu (max %Lu)\n", ctx->peer->device->dev->name, PACKET_CB(skb)->nonce, ctx->keypair->receiving.counter.receive.counter);
 				dev_kfree_skb(skb);
 			} else {
 				skb_reset(skb);
@@ -383,12 +385,18 @@ void packet_decrypt_worker(struct work_struct *work)
 {
 	struct crypt_ctx *ctx;
 	struct crypt_queue *queue = container_of(work, struct crypt_queue, work);
+	struct sk_buff *skb, *tmp;
 	struct wireguard_peer *peer;
 
 	while ((ctx = queue_dequeue_shared(queue)) != NULL) {
-		if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, ctx->skb) < 0 || !skb_decrypt(ctx->skb, &ctx->keypair->receiving))) {
-			dev_kfree_skb(ctx->skb);
-			ctx->skb = NULL;
+		/* All grouped packets are from the same endpoint. */
+		if (unlikely(socket_endpoint_from_skb(&ctx->endpoint, skb_queue_first(&ctx->packets)) < 0))
+			skb_queue_purge(&ctx->packets);
+		skb_queue_walk_safe(&ctx->packets, skb, tmp) {
+			if (unlikely(!skb_decrypt(skb, &ctx->keypair->receiving))) {
+				__skb_unlink(skb, &ctx->packets);
+				dev_kfree_skb(skb);
+			}
 		}
 		/* Dereferencing ctx is unsafe once ctx->state == CTX_FINISHED. */
 		peer = peer_rcu_get(ctx->peer);
@@ -398,31 +406,35 @@ void packet_decrypt_worker(struct work_struct *work)
 	}
 }
 
-void packet_consume_data(struct sk_buff *skb, struct wireguard_device *wg)
+void packet_consume_data(struct wireguard_device *wg, struct sk_buff_head *packets)
 {
 	struct crypt_ctx *ctx;
-	__le32 idx = ((struct message_data *)skb->data)->key_idx;
+	struct noise_keypair *keypair;
+	/* All grouped packets have the same key. */
+	__le32 idx = ((struct message_data *)skb_queue_first(packets)->data)->key_idx;
 
 	ctx = kmem_cache_alloc(crypt_ctx_cache, GFP_ATOMIC);
 	if (unlikely(!ctx)) {
-		dev_kfree_skb(skb);
+		skb_queue_purge(packets);
 		return;
 	}
 	rcu_read_lock_bh();
-	ctx->keypair = noise_keypair_get((struct noise_keypair *)index_hashtable_lookup(&wg->index_hashtable, INDEX_HASHTABLE_KEYPAIR, idx));
+	keypair = noise_keypair_get((struct noise_keypair *)index_hashtable_lookup(&wg->index_hashtable, INDEX_HASHTABLE_KEYPAIR, idx));
 	rcu_read_unlock_bh();
-	if (unlikely(!ctx->keypair)) {
+	if (unlikely(!keypair)) {
 		kmem_cache_free(crypt_ctx_cache, ctx);
-		dev_kfree_skb(skb);
+		skb_queue_purge(packets);
 		return;
 	}
-	ctx->skb = skb;
+	skb_queue_head_init(&ctx->packets);
+	skb_queue_splice_tail(packets, &ctx->packets);
 	/* index_hashtable_lookup() already gets a reference to peer. */
-	ctx->peer = ctx->keypair->entry.peer;
+	ctx->peer = keypair->entry.peer;
+	ctx->keypair = keypair;
 	atomic_set(&ctx->state, CTX_NEW);
 
 	if (unlikely(!queue_enqueue_peer(&ctx->peer->receive_queue, ctx)))
-		drop_ctx_and_return(ctx, false);
+		drop_ctx_and_return(ctx);
 	queue_enqueue_shared(wg->decrypt_queue, ctx, wg->crypt_wq, &wg->decrypt_cpu);
 }
 
@@ -433,6 +445,6 @@ void peer_purge_queues(struct wireguard_peer *peer)
 	if (!spin_trylock(&peer->init_queue_lock))
 		return;
 	while ((ctx = queue_dequeue_peer(&peer->init_queue)) != NULL)
-		drop_ctx(ctx, true);
+		drop_ctx(ctx);
 	spin_unlock(&peer->init_queue_lock);
 }

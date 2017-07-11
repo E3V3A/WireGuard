@@ -266,6 +266,7 @@ continue_processing:
 
 void packet_receive(struct wireguard_device *wg, struct sk_buff *skb)
 {
+	struct sk_buff_head queue;
 	int message_type = skb_prepare_header(skb, wg);
 	if (unlikely(message_type < 0))
 		goto err;
@@ -290,7 +291,9 @@ void packet_receive(struct wireguard_device *wg, struct sk_buff *skb)
 	}
 	case MESSAGE_DATA:
 		PACKET_CB(skb)->ds = ip_tunnel_get_dsfield(ip_hdr(skb), skb);
-		packet_consume_data(skb, wg);
+		__skb_queue_head_init(&queue);
+		__skb_queue_tail(&queue, skb);
+		packet_consume_data(wg, &queue);
 		break;
 	default:
 		net_dbg_skb_ratelimited("%s: Invalid packet from %pISpfsc\n", wg->dev->name, skb);

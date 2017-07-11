@@ -203,14 +203,15 @@ int socket_send_buffer_as_reply_to_skb(struct wireguard_device *wg, struct sk_bu
 
 int socket_endpoint_from_skb(struct endpoint *endpoint, struct sk_buff *skb)
 {
-	memset(endpoint, 0, sizeof(struct endpoint));
 	if (skb->protocol == htons(ETH_P_IP)) {
+		memset(endpoint, 0, sizeof(struct endpoint));
 		endpoint->addr4.sin_family = AF_INET;
 		endpoint->addr4.sin_port = udp_hdr(skb)->source;
 		endpoint->addr4.sin_addr.s_addr = ip_hdr(skb)->saddr;
 		endpoint->src4.s_addr = ip_hdr(skb)->daddr;
 		endpoint->src_if4 = skb->skb_iif;
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		memset(endpoint, 0, sizeof(struct endpoint));
 		endpoint->addr6.sin6_family = AF_INET6;
 		endpoint->addr6.sin6_port = udp_hdr(skb)->source;
 		endpoint->addr6.sin6_addr = ipv6_hdr(skb)->saddr;
