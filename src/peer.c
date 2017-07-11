@@ -58,12 +58,13 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	pubkey_hashtable_add(&wg->peer_hashtable, peer);
 	list_add_tail(&peer->peer_list, &wg->peer_list);
 	peer->work_cpu = choose_cpu(peer->internal_id);
-	INIT_LIST_HEAD(&peer->init_queue);
-	INIT_LIST_HEAD(&peer->send_queue);
-	INIT_LIST_HEAD(&peer->receive_queue);
-	INIT_WORK(&peer->packet_transmission_work, packet_transmission_worker);
-	INIT_WORK(&peer->packet_initialization_work, packet_initialization_worker);
-	INIT_WORK(&peer->packet_consumption_work, packet_consumption_worker);
+	INIT_LIST_HEAD(&peer->init_queue.list);
+	INIT_WORK(&peer->init_queue.work, packet_init_worker);
+	INIT_LIST_HEAD(&peer->send_queue.list);
+	INIT_WORK(&peer->send_queue.work, packet_send_worker);
+	INIT_LIST_HEAD(&peer->receive_queue.list);
+	INIT_WORK(&peer->receive_queue.work, packet_receive_worker);
+	spin_lock_init(&peer->init_queue_lock);
 	pr_debug("%s: Peer %Lu created\n", wg->dev->name, peer->internal_id);
 	return peer;
 }

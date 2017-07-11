@@ -57,7 +57,7 @@ static int open(struct net_device *dev)
 		return ret;
 	peer_for_each (wg, peer, temp, true) {
 		timers_init_peer(peer);
-		queue_work(wg->crypt_wq, &peer->packet_initialization_work);
+		queue_work(wg->crypt_wq, &peer->init_queue.work);
 		if (peer->persistent_keepalive_interval)
 			packet_send_keepalive(peer);
 	}
@@ -169,8 +169,7 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 		__skb_queue_tail(&queue, skb);
 	} while ((skb = next) != NULL);
 
-	if (packet_create_data(&queue, peer))
-		goto err_peer;
+	packet_create_data(peer, &queue);
 
 	peer_put(peer);
 	return NETDEV_TX_OK;
@@ -316,7 +315,7 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		goto error_6;
 	for_each_possible_cpu (cpu) {
 		INIT_LIST_HEAD(&per_cpu_ptr(wg->encrypt_queue, cpu)->list);
-		INIT_WORK(&per_cpu_ptr(wg->encrypt_queue, cpu)->work, packet_encryption_worker);
+		INIT_WORK(&per_cpu_ptr(wg->encrypt_queue, cpu)->work, packet_encrypt_worker);
 	}
 
 	wg->decrypt_queue = alloc_percpu(struct crypt_queue);
@@ -324,7 +323,7 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 		goto error_7;
 	for_each_possible_cpu (cpu) {
 		INIT_LIST_HEAD(&per_cpu_ptr(wg->decrypt_queue, cpu)->list);
-		INIT_WORK(&per_cpu_ptr(wg->decrypt_queue, cpu)->work, packet_decryption_worker);
+		INIT_WORK(&per_cpu_ptr(wg->decrypt_queue, cpu)->work, packet_decrypt_worker);
 	}
 
 	ret = ratelimiter_init();

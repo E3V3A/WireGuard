@@ -22,8 +22,8 @@ struct handshake_worker {
 
 struct crypt_queue {
 	struct list_head list;
-	atomic_t qlen;
 	struct work_struct work;
+	atomic_t qlen;
 };
 
 struct wireguard_device {

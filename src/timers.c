@@ -33,8 +33,7 @@ static void expired_retransmit_handshake(unsigned long ptr)
 		del_timer(&peer->timer_send_keepalive);
 		/* We drop all packets without a keypair and don't try again,
 		 * if we try unsuccessfully for too long to make a handshake. */
-		peer->timer_purge_uninit_packets = true;
-		queue_work(peer->device->crypt_wq, &peer->packet_initialization_work);
+		peer_purge_queues(peer);
 		/* We set a timer for destroying any residue that might be left
 		 * of a partial exchange. */
 		if (likely(peer->timers_enabled) && !timer_pending(&peer->timer_zero_key_material))
