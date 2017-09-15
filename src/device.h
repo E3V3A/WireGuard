@@ -35,10 +35,10 @@ struct wireguard_device {
 	u32 fwmark;
 	struct net *creating_net;
 	struct noise_static_identity static_identity;
-	struct workqueue_struct *handshake_receive_wq, *handshake_send_wq, *packet_crypt_wq;
+	struct workqueue_struct *handshake_receive_wq, *handshake_send_wq, *packet_wq, *crypt_wq;
 	struct sk_buff_head incoming_handshakes;
 	struct crypt_queue __percpu *send_queue, *receive_queue;
-	int incoming_handshake_cpu, encrypt_cpu, decrypt_cpu;
+	int incoming_handshake_cpu;
 	struct handshake_worker __percpu *incoming_handshakes_worker;
 	struct cookie_checker cookie_checker;
 	struct pubkey_hashtable peer_hashtable;

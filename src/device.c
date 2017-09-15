@@ -57,7 +57,7 @@ static int open(struct net_device *dev)
 		return ret;
 	peer_for_each (wg, peer, temp, true) {
 		timers_init_peer(peer);
-		queue_work(wg->packet_crypt_wq, &peer->init_queue.work);
+		queue_work(wg->packet_wq, &peer->init_queue.work);
 		if (peer->persistent_keepalive_interval)
 			packet_send_keepalive(peer);
 	}
@@ -224,7 +224,8 @@ static void destruct(struct net_device *dev)
 	destroy_workqueue(wg->handshake_send_wq);
 	free_percpu(wg->receive_queue);
 	free_percpu(wg->send_queue);
-	destroy_workqueue(wg->packet_crypt_wq);
+	destroy_workqueue(wg->packet_wq);
+	destroy_workqueue(wg->crypt_wq);
 	routing_table_free(&wg->peer_routing_table);
 	ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(struct noise_static_identity));
@@ -305,9 +306,13 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 	if (!wg->handshake_send_wq)
 		goto error_4;
 
-	wg->packet_crypt_wq = alloc_workqueue("wg-crypt-%s", WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 0, dev->name);
-	if (!wg->packet_crypt_wq)
+	wg->packet_wq = alloc_workqueue("wg-pkt-%s", WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 0, dev->name);
+	if (!wg->packet_wq)
 		goto error_5;
+
+	wg->crypt_wq = alloc_workqueue("wg-crypt-%s", WQ_UNBOUND | WQ_FREEZABLE, 0, dev->name);
+	if (!wg->packet_wq)
+		goto error_5b;
 
 	wg->send_queue = alloc_percpu(struct crypt_queue);
 	if (!wg->send_queue)
@@ -349,7 +354,9 @@ error_8:
 error_7:
 	free_percpu(wg->send_queue);
 error_6:
-	destroy_workqueue(wg->packet_crypt_wq);
+	destroy_workqueue(wg->crypt_wq);
+error_5b:
+	destroy_workqueue(wg->packet_wq);
 error_5:
 	destroy_workqueue(wg->handshake_send_wq);
 error_4:

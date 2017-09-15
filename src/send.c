@@ -123,7 +123,7 @@ void packet_send_keepalive(struct wireguard_peer *peer)
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %Lu (%pISpfsc)\n", peer->device->dev->name, peer->internal_id, &peer->endpoint.addr);
 	} else {
 		/* There are packets pending which need to be initialized with the new keypair. */
-		queue_work(peer->device->packet_crypt_wq, &peer->init_queue.work);
+		queue_work(peer->device->packet_wq, &peer->init_queue.work);
 	}
 }
 

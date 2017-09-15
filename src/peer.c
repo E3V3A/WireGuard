@@ -89,8 +89,8 @@ void peer_remove(struct wireguard_peer *peer)
 	pubkey_hashtable_remove(&peer->device->peer_hashtable, peer);
 	atomic_set(&peer->is_draining, true);
 	packet_purge_init_queue(peer);
-	flush_workqueue(peer->device->packet_crypt_wq); /* The first flush is for encrypt/decrypt step. */
-	flush_workqueue(peer->device->packet_crypt_wq); /* The second flush is for send/receive step. */
+	flush_workqueue(peer->device->crypt_wq); /* The first flush is for encrypt/decrypt step. */
+	flush_workqueue(peer->device->packet_wq); /* The second flush is for send/receive step. */
 	flush_workqueue(peer->device->handshake_send_wq);
 	peer_put(peer);
 }
