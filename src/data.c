@@ -99,7 +99,13 @@ static inline bool queue_enqueue_per_peer(struct crypt_queue *queue, struct cryp
 static inline void queue_enqueue_per_device(struct crypt_queue __percpu *queue, struct crypt_ctx *ctx, struct workqueue_struct *wq, int *next_cpu)
 {
 	struct crypt_queue *cpu_queue;
+	struct wireguard_device *wg = ctx->peer->device;
 	int cpu = cpumask_next_online(next_cpu);
+
+	if (atomic_inc_return(&wg->packets_seen) % (1 << num_online_cpus()) == 0)
+		cpu = cpumask_next_online(next_cpu);
+	else
+		cpu = *next_cpu;
 	/* Avoid running parallel work on the same CPU as the one handling all
 	 * of the serial work. This improves overall throughput and especially
 	 * throughput stability where we have at least two cores left for

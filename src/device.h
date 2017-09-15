@@ -46,6 +46,7 @@ struct wireguard_device {
 	struct routing_table peer_routing_table;
 	struct list_head peer_list;
 	struct mutex device_update_lock, socket_update_lock;
+	atomic_t packets_seen;
 };
 
 int device_init(void);
