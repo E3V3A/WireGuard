@@ -497,6 +497,10 @@ static inline int cpu_has_xfeatures(u64 xfeatures_needed, const char **feature_n
 #endif
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
+#define COMPAT_CANNOT_USE_NETDEV_NOTIFIER_INFO
+#endif
+
 /* https://lkml.org/lkml/2017/6/23/790 */
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 #include <linux/ip.h>

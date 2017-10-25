@@ -223,7 +223,8 @@ static void destruct(struct net_device *dev)
 	mutex_unlock(&wg->device_update_lock);
 	free_percpu(dev->tstats);
 	free_percpu(wg->incoming_handshakes_worker);
-	put_net(wg->creating_net);
+	if (wg->have_taken_creating_net_ref)
+		put_net(wg->creating_net);
 
 	pr_debug("%s: Interface deleted\n", dev->name);
 	free_netdev(dev);
@@ -264,7 +265,7 @@ static int newlink(struct net *src_net, struct net_device *dev, struct nlattr *t
 	int ret = -ENOMEM;
 	struct wireguard_device *wg = netdev_priv(dev);
 
-	wg->creating_net = get_net(src_net);
+	wg->creating_net = src_net;
 	init_rwsem(&wg->static_identity.lock);
 	mutex_init(&wg->socket_update_lock);
 	mutex_init(&wg->device_update_lock);
@@ -337,7 +338,6 @@ error_3:
 error_2:
 	free_percpu(dev->tstats);
 error_1:
-	put_net(src_net);
 	return ret;
 }
 
@@ -348,20 +348,61 @@ static struct rtnl_link_ops link_ops __read_mostly = {
 	.newlink		= newlink,
 };
 
+static int take_netns_ref_notifier_cb(struct notifier_block *nb, unsigned long action, void *data)
+{
+#ifndef COMPAT_CANNOT_USE_NETDEV_NOTIFIER_INFO
+	struct net_device *dev = ((struct netdev_notifier_info *)data)->dev;
+#else
+	struct net_device *dev = data;
+#endif
+	struct wireguard_device *wg = netdev_priv(dev);
+
+	ASSERT_RTNL();
+
+	if (action != NETDEV_REGISTER || dev->netdev_ops != &netdev_ops)
+		return 0;
+
+	if (dev_net(dev) == wg->creating_net && wg->have_taken_creating_net_ref) {
+		put_net(wg->creating_net);
+		wg->have_taken_creating_net_ref = false;
+	} else if (dev_net(dev) != wg->creating_net && !wg->have_taken_creating_net_ref) {
+		wg->have_taken_creating_net_ref = true;
+		get_net(wg->creating_net);
+	}
+	return 0;
+}
+
+static struct notifier_block take_netns_ref_notifier = { .notifier_call = take_netns_ref_notifier_cb };
+
 int __init device_init(void)
 {
-#ifdef CONFIG_PM_SLEEP
-	int ret = register_pm_notifier(&clear_peers_on_suspend);
+	int ret = register_netdevice_notifier(&take_netns_ref_notifier);
 
 	if (ret)
 		return ret;
+
+#ifdef CONFIG_PM_SLEEP
+	ret = register_pm_notifier(&clear_peers_on_suspend);
+
+	if (ret) {
+		unregister_netdevice_notifier(&take_netns_ref_notifier);
+		return ret;
+	}
 #endif
-	return rtnl_link_register(&link_ops);
+	ret = rtnl_link_register(&link_ops);
+	if (ret) {
+		unregister_netdevice_notifier(&take_netns_ref_notifier);
+#ifdef CONFIG_PM_SLEEP
+		unregister_pm_notifier(&clear_peers_on_suspend);
+#endif
+	}
+	return ret;
 }
 
 void device_uninit(void)
 {
 	rtnl_link_unregister(&link_ops);
+	unregister_netdevice_notifier(&take_netns_ref_notifier);
 #ifdef CONFIG_PM_SLEEP
 	unregister_pm_notifier(&clear_peers_on_suspend);
 #endif
