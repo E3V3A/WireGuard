@@ -426,6 +426,9 @@ n0 wg showconf wg0 > /dev/null
 ip0 link del wg0
 
 ! n0 wg show doesnotexist || false
+ip0 link add wg0 type wireguard
+! n0 wg set wg0 peer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= || false
+! n0 wg set wg0 private-key <(echo AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=) || false
 
 declare -A objects
 while read -t 0.1 -r line 2>/dev/null || [[ $? -ne 142 ]]; do

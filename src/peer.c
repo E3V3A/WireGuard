@@ -21,17 +21,17 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	lockdep_assert_held(&wg->device_update_lock);
 
 	if (wg->num_peers >= MAX_PEERS_PER_DEVICE)
-		return NULL;
+		return ERR_PTR(-EMFILE);
 	++wg->num_peers;
 
 	peer = kzalloc(sizeof(struct wireguard_peer), GFP_KERNEL);
 	if (!peer)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	peer->device = wg;
 
 	if (dst_cache_init(&peer->endpoint_cache, GFP_KERNEL)) {
 		kfree(peer);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	peer->internal_id = atomic64_inc_return(&peer_counter);
@@ -39,7 +39,7 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	cookie_init(&peer->latest_cookie);
 	if (!noise_handshake_init(&peer->handshake, &wg->static_identity, public_key, preshared_key, peer)) {
 		kfree(peer);
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 	timers_init(peer);
 	cookie_checker_precompute_peer_keys(peer);

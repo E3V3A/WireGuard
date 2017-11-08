@@ -22,6 +22,7 @@
  * <- e, ee, se, psk, {}
  */
 
+static const u8 null_point[NOISE_PUBLIC_KEY_LEN] = { 0 };
 static const u8 handshake_name[37] = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
 static const u8 identifier_name[34] = "WireGuard v1 zx2c4 Jason@zx2c4.com";
 static u8 handshake_init_hash[NOISE_HASH_LEN] __ro_after_init;
@@ -49,6 +50,8 @@ bool noise_precompute_static_static(struct wireguard_peer *peer)
 
 bool noise_handshake_init(struct noise_handshake *handshake, struct noise_static_identity *static_identity, const u8 peer_public_key[NOISE_PUBLIC_KEY_LEN], const u8 peer_preshared_key[NOISE_SYMMETRIC_KEY_LEN], struct wireguard_peer *peer)
 {
+	if (unlikely(!crypto_memneq(peer_public_key, null_point, NOISE_PUBLIC_KEY_LEN)))
+		return false;
 	memset(handshake, 0, sizeof(struct noise_handshake));
 	init_rwsem(&handshake->lock);
 	handshake->entry.type = INDEX_HASHTABLE_HANDSHAKE;
@@ -218,12 +221,15 @@ bool noise_received_with_keypair(struct noise_keypairs *keypairs, struct noise_k
 	return true;
 }
 
-void noise_set_static_identity_private_key(struct noise_static_identity *static_identity, const u8 private_key[NOISE_PUBLIC_KEY_LEN])
+bool noise_set_static_identity_private_key(struct noise_static_identity *static_identity, const u8 private_key[NOISE_PUBLIC_KEY_LEN])
 {
+	if (unlikely(!crypto_memneq(private_key, null_point, NOISE_PUBLIC_KEY_LEN)))
+		return false;
 	down_write(&static_identity->lock);
 	memcpy(static_identity->static_private, private_key, NOISE_PUBLIC_KEY_LEN);
 	static_identity->has_identity = curve25519_generate_public(static_identity->static_public, private_key);
 	up_write(&static_identity->lock);
+	return true;
 }
 
 /* This is Hugo Krawczyk's HKDF:
