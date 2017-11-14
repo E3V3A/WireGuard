@@ -825,12 +825,10 @@ bool chacha20poly1305_decrypt_sg(struct scatterlist *dst, struct scatterlist *sr
 			size_t chunk_len = rounddown(walk.nbytes, CHACHA20_BLOCK_SIZE);
 
 			poly1305_update(&poly1305_state, walk.src.virt.addr, chunk_len, have_simd);
-			chacha20_crypt(&chacha20_state, walk.dst.virt.addr, walk.src.virt.addr, chunk_len, have_simd);
 			ret = blkcipher_walk_done(&chacha20_desc, &walk, walk.nbytes % CHACHA20_BLOCK_SIZE);
 		}
 		if (walk.nbytes) {
 			poly1305_update(&poly1305_state, walk.src.virt.addr, walk.nbytes, have_simd);
-			chacha20_crypt(&chacha20_state, walk.dst.virt.addr, walk.src.virt.addr, walk.nbytes, have_simd);
 			ret = blkcipher_walk_done(&chacha20_desc, &walk, 0);
 		}
 	}
@@ -850,6 +848,21 @@ bool chacha20poly1305_decrypt_sg(struct scatterlist *dst, struct scatterlist *sr
 
 	scatterwalk_map_and_copy(read_mac, src, dst_len, POLY1305_MAC_SIZE, 0);
 	ret = crypto_memneq(read_mac, computed_mac, POLY1305_MAC_SIZE);
+
+	if (likely(!ret && dst_len)) {
+		blkcipher_walk_init(&walk, dst, src, dst_len);
+		ret = blkcipher_walk_virt_block(&chacha20_desc, &walk, CHACHA20_BLOCK_SIZE);
+		while (walk.nbytes >= CHACHA20_BLOCK_SIZE) {
+			size_t chunk_len = rounddown(walk.nbytes, CHACHA20_BLOCK_SIZE);
+
+			chacha20_crypt(&chacha20_state, walk.dst.virt.addr, walk.src.virt.addr, chunk_len, have_simd);
+			ret = blkcipher_walk_done(&chacha20_desc, &walk, walk.nbytes % CHACHA20_BLOCK_SIZE);
+		}
+		if (walk.nbytes) {
+			chacha20_crypt(&chacha20_state, walk.dst.virt.addr, walk.src.virt.addr, walk.nbytes, have_simd);
+			ret = blkcipher_walk_done(&chacha20_desc, &walk, 0);
+		}
+	}
 err:
 	memzero_explicit(read_mac, POLY1305_MAC_SIZE);
 	memzero_explicit(computed_mac, POLY1305_MAC_SIZE);
